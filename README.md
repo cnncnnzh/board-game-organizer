@@ -83,7 +83,7 @@ npm start
 | --- | --- |
 | `HOST` | `127.0.0.1`；容器中通常设置 `0.0.0.0` |
 | `PORT` | `3000` |
-| `PUBLIC_ORIGIN` | `http://localhost:3000`，只包含协议、域名和可选端口，不带路径或末尾斜线；生产须 HTTPS |
+| `PUBLIC_ORIGIN` | 显式值优先；未设置时使用 Render 的 `RENDER_EXTERNAL_URL`，本地默认 `http://localhost:3000`。只包含协议、域名和可选端口，不带路径或末尾斜线；生产须 HTTPS |
 | `DATABASE_URL` | 留空使用本地 PGlite；设置后使用外部 PostgreSQL |
 | `DATA_DIR` | `./data/board-games`，本地 PGlite 持久化目录 |
 | `NODE_ENV` | 设置 `production` 后要求外部 PostgreSQL 和 HTTPS origin，Cookie 启用 Secure，测试工具强制关闭 |
@@ -107,9 +107,31 @@ npm run db:migrate
 npm start
 ```
 
-生产环境同时设置 `NODE_ENV=production` 和真实的 HTTPS `PUBLIC_ORIGIN`，在 HTTPS 反向代理后运行应用。根据数据库服务要求配置连接字符串中的 TLS 选项，连接凭证放在部署环境配置中。
+生产环境设置 `NODE_ENV=production`，在 HTTPS 反向代理后运行应用。Render 自动提供 `RENDER_EXTERNAL_URL`，应用在未设置 `PUBLIC_ORIGIN` 时直接使用它；其他平台或自定义域名应显式设置真实的 HTTPS `PUBLIC_ORIGIN`。根据数据库服务要求配置连接字符串中的 TLS 选项，连接凭证放在部署环境配置中。
 
 外部 PostgreSQL 模式可额外运行 `npm run worker`。API 内置任务仍可工作；它们共用活动行锁和幂等结算逻辑，重复检查不会重复分配。
+
+### Render Docker + Supabase
+
+在 Render 创建 Docker Web Service，连接此仓库和目标分支，Dockerfile Path 使用 `./Dockerfile`。仓库根目录包含项目文件时，Root Directory 留空。应用和数据库尽量选择相近地区。
+
+在 Render 的 Environment 中设置：
+
+| Key | Value |
+| --- | --- |
+| `NODE_ENV` | `production` |
+| `HOST` | `0.0.0.0` |
+| `PORT` | `10000` |
+| `DATABASE_URL` | Supabase Session pooler 的完整 PostgreSQL URI，端口 5432，启用 `sslmode=require` |
+| `ENABLE_TEST_TOOLS` | `false` |
+
+首次部署可以不设置 `PUBLIC_ORIGIN`，应用会自动使用 Render 分配的 HTTPS 网址。绑定自定义域名后，显式设置 `PUBLIC_ORIGIN` 为该域名的完整 HTTPS origin。不要将 `${RENDER_EXTERNAL_URL}` 这样的变量表达式作为普通环境变量的字面值填写。
+
+**Docker Command 留空。** 项目 Dockerfile 自带 `CMD ["node", "dist/server.js"]`，无需额外的 shell/export 启动命令。若已有自定义 Docker Command，请在 Settings → Build & Deploy 中清空并保存，再部署最新提交。日志中的 `/bin/sh: export …: not found` 属于自定义启动命令解析错误，清空该覆盖项后使用默认 CMD。
+
+Health Check Path 设置 `/api/v1/health/ready`。启动时自动执行数据库迁移。Supabase 仅作为后端的 PostgreSQL 使用，关闭不使用的 Data API，连接串仅保存在 Render 环境配置中。
+
+Render Free 实例休眠期间不会运行周期任务；唤醒时会补跑。需要准时结算和清理时，使用常驻实例。参考 [Render Docker 配置](https://render.com/docs/docker) 和 [默认环境变量](https://render.com/docs/environment-variables)。
 
 ### Docker Compose（可选）
 
@@ -143,6 +165,8 @@ npm start
 运行 `npm test`、`npm run check` 和 `npm run build` 验证当前代码。测试默认使用 PGlite，覆盖算法、匿名权限、事务一致性、候补、结算和清理。
 
 本次已分别在 PGlite 和真实 PostgreSQL 18.6 上通过 37 项测试，并通过 TypeScript 检查与构建；外部 PostgreSQL 路径包含多连接竞争场景。
+
+另新增 7 项 Render 环境配置与生产模式测试，覆盖平台地址自动识别、自定义域名、HTTPS 校验、Secure Cookie 和跨站请求拒绝。当前默认测试共 44 项通过。
 
 浏览器已验证创建活动、通过活动码进入、只填写姓名加入、开桌与匿名报名入席。编译版本重启后测试活动及报名仍保留；依赖审计为 0 个已知漏洞。界面验证截图见 [匿名报名成功](docs/anonymous-registration.png)。
 

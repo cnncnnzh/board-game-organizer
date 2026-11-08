@@ -7,7 +7,9 @@ export function config() {
   const production = process.env.NODE_ENV === 'production';
   const databaseUrl = process.env.DATABASE_URL || undefined;
   if (production && !databaseUrl) throw new Error('生产环境必须设置 DATABASE_URL，PGlite 仅用于本地开发。');
-  const origin = process.env.PUBLIC_ORIGIN || 'http://localhost:3000';
+  // Render supplies the actual HTTPS service URL before the first container starts.
+  // Resolve it in Node so Docker can use its normal CMD without shell quoting.
+  const origin = process.env.PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
   const parsed = new URL(origin);
   if (parsed.origin !== origin) throw new Error('PUBLIC_ORIGIN 必须是完整 origin，不带路径或末尾斜线。');
   if (production && parsed.protocol !== 'https:') throw new Error('生产环境 PUBLIC_ORIGIN 必须使用 HTTPS。');
