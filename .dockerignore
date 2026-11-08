@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+.env
+.git
+.tools
+.npm-cache
+test
+test-results
+*.log
