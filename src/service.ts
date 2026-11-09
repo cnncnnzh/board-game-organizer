@@ -348,23 +348,42 @@ export class EventService {
         result: { gameCount: games.length, attendeeCount: mapped.reduce((n, g) => n + g.attendees.length, 0), assignedFromWaitlist: allocation.assignments.length, unassignedCount: allocation.unassigned.length } };
     });
   }
+  async finalizeTestEvent(code: string, actor: Actor) {
+    return this.db.transaction(async (tx) => {
+      const event = await this.locked(tx, code);
+      await this.requireTest(tx, event, actor);
+      if (event.status === 'open') {
+        const games = (await tx.query('SELECT id FROM games WHERE event_id=$1', [event.id])).rows;
+        assert(games.length, 'INVALID_INPUT', '请先创建至少一个桌游');
+        // Simulate the deadline, preserving the seed so a preview of this snapshot still matches.
+        if (this.now() < new Date(event.registration_closes_at).getTime()) {
+          event.registration_closes_at = new Date(this.now()).toISOString();
+          await tx.query('UPDATE events SET registration_closes_at=$1 WHERE id=$2', [event.registration_closes_at, event.id]);
+        }
+        await this.finalizeLocked(tx, event);
+      }
+      return { result: event.result };
+    });
+  }
   private async testMember(tx: Queryable, eventId: string, id: string) {
     const member = (await tx.query(`SELECT m.*,p.is_test,p.is_test_host FROM event_members m JOIN participants p ON p.id=m.participant_id
       WHERE m.event_id=$1 AND m.participant_id=$2 AND p.is_test`, [eventId, id])).rows[0];
     assert(member, 'NOT_FOUND', '测试用户不存在', 404);
     return member;
   }
-  async createTestUsers(code: string, actor: Actor, count: unknown, hostGame?: Row) {
+  async createTestUsers(code: string, actor: Actor, count: unknown, { hostGame, gameId }: { hostGame?: Row; gameId?: string } = {}) {
     const number = hostGame ? 1 : Number(count);
     assert(Number.isInteger(number) && number >= 1 && number <= 30, 'INVALID_INPUT', '单次创建数量为 1–30');
     return this.db.transaction(async (tx) => {
       const event = await this.locked(tx, code);
       await this.requireTest(tx, event, actor);
       this.mutable(event);
+      if (gameId) await this.requireGame(tx, event.id, gameId);
       const total = (await tx.query('SELECT count(*)::int AS count FROM event_members m JOIN participants p ON p.id=m.participant_id WHERE m.event_id=$1 AND p.is_test', [event.id])).rows[0]!.count;
       assert(total + number <= 50, 'INVALID_INPUT', '每个活动最多 50 个测试用户');
       const ids: string[] = [];
       let gameResult: { gameId: string } | undefined;
+      let attendeeCount = 0, waitlistCount = 0;
       for (let i = 0; i < number; i++) {
         const id = randomUUID();
         const name = `${hostGame ? '测试host' : '测试玩家'} ${id.slice(0, 8)}`;
@@ -372,8 +391,13 @@ export class EventService {
         await this.addMember(tx, event.id, id, name);
         ids.push(id);
         if (hostGame) gameResult = await this.createGameInTx(tx, event, { participant_id: id, is_test: true, is_test_host: true }, hostGame);
+        if (gameId) {
+          const registration = await this.joinGameInTx(tx, event, { participant_id: id }, gameId);
+          if (registration.status === 'attendee') attendeeCount++; else waitlistCount++;
+        }
       }
-      return { createdCount: number, participantIds: ids, ...gameResult };
+      return { createdCount: number, participantIds: ids, ...gameResult,
+        ...(gameId ? { gameId, attendeeCount, waitlistCount } : {}) };
     });
   }
   async joinTestUser(code: string, actor: Actor, targetId: string, gameId: string) {

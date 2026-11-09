@@ -102,7 +102,9 @@ export async function buildApp(options: {
   route('POST', '/events/:code/owner-transfer', async (req) => app.service.transferOwner(params(req).code!, actor(req), String(body(req).participantId ?? '')));
   route('POST', '/events/:code/preview', async (req) => app.service.preview(params(req).code!, actor(req)));
   route('POST', '/events/:code/test-users', async (req) => app.service.createTestUsers(params(req).code!, actor(req), body(req).count));
-  route('POST', '/events/:code/test-games', async (req) => app.service.createTestUsers(params(req).code!, actor(req), 1, body(req)));
+  route('POST', '/events/:code/test-games', async (req) => app.service.createTestUsers(params(req).code!, actor(req), 1, { hostGame: body(req) }));
+  route('POST', '/events/:code/games/:id/test-users', async (req) => app.service.createTestUsers(params(req).code!, actor(req), body(req).count, { gameId: params(req).id! }));
+  route('POST', '/events/:code/test-finalize', async (req) => app.service.finalizeTestEvent(params(req).code!, actor(req)));
   route('POST', '/events/:code/test-fill', async (req) => app.service.fillTestUsers(params(req).code!, actor(req)));
   route('POST', '/events/:code/test-reuse', async (req) => app.service.reuseTestUsers(params(req).code!, actor(req)));
   route('POST', '/events/:code/test-users/:id/join', async (req) => app.service.joinTestUser(params(req).code!, actor(req), params(req).id!, String(body(req).gameId ?? '')));

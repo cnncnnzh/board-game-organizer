@@ -2,7 +2,7 @@
 
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
-const state = { participant: null, browserParticipant: null, code: '', details: null, preview: null, secret: null, busy: false };
+const state = { participant: null, browserParticipant: null, code: '', details: null, preview: null, secret: null, busy: false, expandedGames: new Set(), testToolsOpen: true, testGameId: '' };
 const esc = (value = '') => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const roleLabel = (role) => ({ owner: '组织者', admin: '管理员', member: '成员' }[role] || '成员');
 
@@ -103,17 +103,22 @@ function renderGame(game) {
   const open = mutable();
   const mine = state.details.registration;
   const isHost = game.isHost || game.hostId === state.participant?.id;
-  return `<article class="game-card"><div class="game-header"><div><h3>${esc(game.name)}</h3><span class="game-host">Host · ${esc(game.hostName || '—')}${game.difficulty ? `　· ${esc(game.difficulty)}` : ''}</span></div><span class="seat-count">${game.attendees?.length || 0}<span class="muted"> / ${esc(game.capacity)}</span></span></div>
+  const expanded = state.expandedGames.has(game.id);
+  return `<article class="game-card"><div class="game-header"><div><h3>${esc(game.name)}</h3>${game.difficulty ? `<span class="game-difficulty">${esc(game.difficulty)}</span>` : ''}</div><button type="button" class="seat-count" data-action="toggle-roster" data-id="${esc(game.id)}" aria-expanded="${expanded}" aria-controls="game-roster-${esc(game.id)}" aria-label="${esc(game.name)}：${game.attendees?.length || 0} / ${esc(game.capacity)} 人，Host 和参与者"><span class="seat-chevron" aria-hidden="true">&gt;</span><span>${game.attendees?.length || 0}<span class="muted"> / ${esc(game.capacity)}</span></span></button></div>
+    <div id="game-roster-${esc(game.id)}" class="game-roster"${expanded ? '' : ' hidden'}>
+      <p class="game-host">Host · ${esc(game.hostName || '—')}</p>
+      <div><span class="member-label">已入席${isHost ? ' · 你是 Host' : ''}</span>${names(game.attendees)}</div>
+      ${game.waitlist?.length ? `<div><span class="member-label">候补 · ${game.waitlist.length} 人</span>${names(game.waitlist, true)}</div>` : ''}
+    </div>
     ${game.description ? `<p class="game-description">${esc(game.description)}</p>` : ''}
-    <div><span class="member-label">已入席${isHost ? ' · 你是 Host' : ''}</span>${names(game.attendees)}</div>
-    ${game.waitlist?.length ? `<div><span class="member-label">候补 · ${game.waitlist.length} 人</span>${names(game.waitlist, true)}</div>` : ''}
     ${open ? `<div class="game-actions">${!mine ? `<button class="button ${(game.attendees?.length || 0) < game.capacity ? 'button-primary' : 'button-secondary'} button-block" data-action="join" data-id="${esc(game.id)}">${(game.attendees?.length || 0) < game.capacity ? '报名这桌' : '加入候补'}</button>` : `<span class="badge ${mine.primaryGameId === game.id ? '' : 'badge-closed'}">${mine.primaryGameId === game.id ? (mine.isHost ? '我主持的桌' : mine.status === 'waitlist' ? '我正在候补' : '我报名的桌') : '退出当前报名后可换桌'}</span>`}
     ${isHost ? `<details><summary>编辑我的桌游</summary><form data-form="edit-game" data-id="${esc(game.id)}" class="form-stack">${gameFields(game)}<div class="button-row"><button class="button button-secondary" type="submit">保存桌游</button><button class="button button-danger" type="button" data-action="delete-game" data-id="${esc(game.id)}">删除这桌</button></div></form></details>` : ''}</div>` : ''}
   </article>`;
 }
 
 function renderIdentity() {
-  return `<section class="panel identity-panel"><h2>${state.participant ? `你好，${esc(state.participant.displayName)}` : '填写名字，加入这场活动'}</h2><form data-form="identity" class="inline-form"><label class="field">姓名或微信名<input id="identity-name" name="displayName" autocomplete="nickname" maxlength="40" value="${esc(state.participant?.displayName || state.browserParticipant?.displayName)}" placeholder="朋友认识的名字" required></label><button class="button button-secondary" type="submit">${state.participant ? '更新名字' : '保存名字，开始报名'}</button></form><p class="help">无需登录。此浏览器会记住你的报名凭证；换浏览器或清除 Cookie 后，输入同名不能恢复原报名。活动中若已有人使用同名，请加一个可辨认的后缀。</p></section>`;
+  const form = `<form data-form="identity" class="inline-form"><label class="field">姓名或微信名<input id="identity-name" name="displayName" autocomplete="nickname" maxlength="40" value="${esc(state.participant?.displayName || state.browserParticipant?.displayName)}" placeholder="朋友认识的名字" required></label><button class="button button-secondary" type="submit">${state.participant ? '保存姓名' : '保存名字，开始报名'}</button></form><p class="help">无需登录。此浏览器会记住你的报名凭证；换浏览器或清除 Cookie 后，输入同名不能恢复原报名。活动中若已有人使用同名，请加一个可辨认的后缀。</p>`;
+  return `<section class="panel identity-panel"><h2>${state.participant ? `你好，${esc(state.participant.displayName)}` : '填写名字，加入这场活动'}</h2>${state.participant ? `<details class="identity-editor"><summary class="button button-secondary">更新姓名</summary>${form}</details>` : form}</section>`;
 }
 
 function renderMyStatus() {
@@ -142,9 +147,20 @@ function renderTestTools() {
   if (!state.details.testToolsEnabled || state.details.event.role !== 'owner') return '';
   const testUsers = (state.details.members || []).filter((member) => member.isTest);
   const games = state.details.games;
-  return `<section class="panel test-panel"><details><summary>测试工具（仅测试环境）</summary><p class="help">这些操作只用于模拟报名流程。分配预览不会截止活动或写入正式结果。</p><div class="test-columns"><form data-form="test-users" class="form-stack"><label class="field">批量创建测试玩家（每次 1–30 人）<input name="count" type="number" min="1" max="30" value="10" required></label><button class="button button-secondary" type="submit">创建测试玩家</button></form><form data-form="test-game" class="form-stack"><label class="field">测试桌游名称<input name="name" maxlength="50" value="测试桌游" required></label><label class="field">人数上限<input name="capacity" type="number" min="1" max="100" value="4" required></label><button class="button button-secondary" type="submit">创建测试 Host 和桌游</button></form></div><div class="button-row"><button class="button button-secondary" data-action="test-reuse">复用上次测试用户</button><button class="button button-secondary" data-action="test-fill">均匀报名测试玩家</button><button class="button button-yellow" data-action="preview">预览最终分配</button><button class="button button-danger" data-action="clear-test-users">清理测试用户与关联报名</button><button class="button button-danger" data-action="clear-test-event">清除活动，保留测试用户</button></div>
-    ${testUsers.length ? `<div class="member-table-wrap"><table class="member-table test-table"><thead><tr><th>测试成员</th><th>模拟操作</th></tr></thead><tbody>${testUsers.map((member) => `<tr><td>${esc(member.displayName)}</td><td><form data-form="test-join" data-id="${esc(member.id)}" class="button-row"><select name="gameId" aria-label="${esc(member.displayName)}要报名的桌游" required><option value="">选择桌游</option>${games.map((game) => `<option value="${esc(game.id)}">${esc(game.name)}</option>`).join('')}</select><button class="button button-secondary button-small" type="submit">报名</button><button class="button button-secondary button-small" type="button" data-action="test-drop" data-id="${esc(member.id)}">退出</button></form></td></tr>`).join('')}</tbody></table></div>` : ''}
-    <div id="allocation-preview">${renderPreview()}</div></details></section>`;
+  const testPlayers = testUsers.filter((member) => !games.some((game) => game.hostId === member.id));
+  const open = mutable();
+  return `<section class="panel test-panel"><details id="test-tools" ${state.testToolsOpen ? 'open' : ''}><summary>测试工具（仅测试环境）· ${testUsers.length} 个测试身份</summary>
+    ${open ? `<p class="help">先创建测试桌游和 Host，再为指定桌游批量加人。满员后自动候补，每个活动最多 50 个测试身份（包含 Host）。</p>
+      <div class="test-columns">
+        <form data-form="test-game" class="form-stack"><h3>1. 创建测试桌游</h3><label class="field">测试桌游名称<input name="name" maxlength="50" value="测试桌游" required></label><label class="field">人数上限（包含 Host）<input name="capacity" type="number" min="1" max="100" value="4" required></label><p class="help">自动创建独立测试 Host，占用一个席位。</p><button class="button button-secondary" type="submit">创建测试桌游和 Host</button></form>
+        <form data-form="test-game-users" class="form-stack"><h3>2. 给指定桌游添加玩家</h3><label class="field">目标桌游<select name="gameId" required ${games.length ? '' : 'disabled'}><option value="">选择桌游</option>${games.map((game) => `<option value="${esc(game.id)}" ${game.id === state.testGameId ? 'selected' : ''}>${esc(game.name)} · ${game.attendees.length}/${esc(game.capacity)} 人 · ${game.waitlist.length} 人候补</option>`).join('')}</select></label><label class="field">新增测试玩家数（1–30 人）<input name="count" type="number" min="1" max="30" value="5" required></label><p class="help">${games.length ? '新玩家会直接报名所选桌游，超出容量的人进入候补。' : '请先创建至少一个桌游。'}</p><button class="button button-secondary" type="submit" ${games.length ? '' : 'disabled'}>创建玩家并报名这桌</button></form>
+      </div>
+      <h3>3. 分配并查看结果</h3><p class="help">一键分配会立即截止本活动，保存正式结果并冻结报名；想继续调整数据时，可先仅预览。</p><div class="button-row"><button class="button button-yellow" data-action="test-finalize" ${games.length ? '' : 'disabled'}>一键截止并分配，查看结果</button><button class="button button-secondary" data-action="preview" ${games.length ? '' : 'disabled'}>仅预览（不截止）</button></div>
+      <details><summary>更多测试操作</summary><form data-form="test-users" class="inline-form"><label class="field">仅创建测试玩家（暂不报名，1–30 人）<input name="count" type="number" min="1" max="30" value="10" required></label><button class="button button-secondary" type="submit">创建测试玩家</button></form><div class="button-row"><button class="button button-secondary" data-action="test-reuse">复用上次测试用户</button><button class="button button-secondary" data-action="test-fill">均匀报名测试玩家</button></div>
+        ${testPlayers.length ? `<div class="member-table-wrap"><table class="member-table test-table"><thead><tr><th>测试玩家</th><th>模拟操作</th></tr></thead><tbody>${testPlayers.map((member) => `<tr><td>${esc(member.displayName)}</td><td><form data-form="test-join" data-id="${esc(member.id)}" class="button-row"><select name="gameId" aria-label="${esc(member.displayName)}要报名的桌游" required><option value="">选择桌游</option>${games.map((game) => `<option value="${esc(game.id)}">${esc(game.name)}</option>`).join('')}</select><button class="button button-secondary button-small" type="submit">报名</button><button class="button button-secondary button-small" type="button" data-action="test-drop" data-id="${esc(member.id)}">退出</button></form></td></tr>`).join('')}</tbody></table></div>` : ''}
+      </details><div id="allocation-preview">${renderPreview()}</div>` : '<p class="help">本活动已截止。最终分配结果在上方展示；如需重新测试，可清除活动并创建新活动，测试身份可复用。</p>'}
+    <hr class="divider"><div class="button-row"><button class="button button-danger" data-action="clear-test-users">清理测试用户与关联报名</button><button class="button button-danger" data-action="clear-test-event">清除活动，保留测试用户</button></div>
+    </details></section>`;
 }
 
 function renderPreview() {
@@ -179,6 +195,9 @@ function renderEvent() {
 async function loadRoute() {
   const match = location.pathname.match(/^\/events\/([^/]+)\/?$/);
   state.code = match ? decodeURIComponent(match[1]).toUpperCase() : '';
+  state.expandedGames.clear();
+  state.testToolsOpen = true;
+  state.testGameId = '';
   root.setAttribute('aria-busy', 'true');
   try {
     const session = await api('/session');
@@ -196,12 +215,13 @@ async function loadRoute() {
   }
 }
 
-async function refresh() {
+async function refresh({ expandGames = false } = {}) {
   const session = await api('/session');
   state.browserParticipant = session.participant;
   state.details = await api(`/events/${encodeURIComponent(state.code)}`);
   state.participant = 'participant' in state.details ? state.details.participant : session.participant;
   state.preview = null;
+  if (expandGames) state.details.games.forEach((game) => state.expandedGames.add(game.id));
   renderEvent();
 }
 
@@ -305,7 +325,15 @@ root.addEventListener('submit', (event) => {
     if (kind === 'test-users') {
       await api(`/events/${state.code}/test-users`, 'POST', { count: Number(values.count) });
     } else if (kind === 'test-game') {
-      await api(`/events/${state.code}/test-games`, 'POST', { ...values, capacity: Number(values.capacity) });
+      const result = await api(`/events/${state.code}/test-games`, 'POST', { ...values, capacity: Number(values.capacity) });
+      state.testGameId = result.gameId;
+    } else if (kind === 'test-game-users') {
+      const result = await api(`/events/${state.code}/games/${encodeURIComponent(values.gameId)}/test-users`, 'POST', { count: Number(values.count) });
+      state.testGameId = values.gameId;
+      state.expandedGames.add(values.gameId);
+      await refresh();
+      message(`已添加 ${result.createdCount} 位测试玩家：${result.attendeeCount} 人入席，${result.waitlistCount} 人候补。`);
+      return;
     } else if (kind === 'test-join') {
       await api(`/events/${state.code}/test-users/${encodeURIComponent(form.dataset.id)}/join`, 'POST', values);
     }
@@ -321,10 +349,22 @@ async function copy(text, label) {
   message(`请手动复制${label}：${text}`);
 }
 
+root.addEventListener('toggle', (event) => {
+  if (event.target.id === 'test-tools') state.testToolsOpen = event.target.open;
+}, true);
+
 root.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
   if (!button) return;
   event.preventDefault();
+  if (button.dataset.action === 'toggle-roster') {
+    const expanded = button.getAttribute('aria-expanded') !== 'true';
+    button.setAttribute('aria-expanded', String(expanded));
+    document.getElementById(button.getAttribute('aria-controls')).hidden = !expanded;
+    if (expanded) state.expandedGames.add(button.dataset.id);
+    else state.expandedGames.delete(button.dataset.id);
+    return;
+  }
   void run(async () => {
     const action = button.dataset.action;
     const id = encodeURIComponent(button.dataset.id || '');
@@ -378,6 +418,12 @@ root.addEventListener('click', (event) => {
       await api(`/events/${state.code}/test-fill`, 'POST', {});
     } else if (action === 'test-reuse') {
       await api(`/events/${state.code}/test-reuse`, 'POST', {});
+    } else if (action === 'test-finalize') {
+      const { result } = await api(`/events/${state.code}/test-finalize`, 'POST', {});
+      await refresh({ expandGames: true });
+      message(`测试分配已完成：${result.attendeeCount} 人入席，${result.assignedFromWaitlist} 人从候补分配，${result.unassignedCount} 人未分配。`);
+      document.querySelector('.result-summary')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return;
     } else if (action === 'preview') {
       state.preview = await api(`/events/${state.code}/preview`, 'POST', {});
       document.querySelector('#allocation-preview').innerHTML = renderPreview();

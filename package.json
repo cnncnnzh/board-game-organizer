@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "start:test": "tsx src/local-test-server.ts",
     "build": "tsc",
     "start:production": "node dist/server.js",
     "worker": "tsx src/worker.ts",

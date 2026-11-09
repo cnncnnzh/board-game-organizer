@@ -94,6 +94,10 @@ function responseSchema(method: string, path: string): Schema {
   if (path.endsWith('/management-key')) return ref('ManagementKeyEnvelope');
   if (path.endsWith('/owner-transfer')) return envelope(object({ ownerId: id }));
   if (path.endsWith('/preview')) return ref('PreviewEnvelope');
+  if (path.endsWith('/test-finalize')) return envelope(object({ result: ref('Result') }));
+  if (method === 'POST' && path === '/events/:code/games/:id/test-users') return envelope(object({
+    createdCount: count, participantIds: list(id), gameId: id, attendeeCount: count, waitlistCount: count,
+  }));
   return ref('DataEnvelope');
 }
 
@@ -109,6 +113,8 @@ const summaries: Record<string, string> = {
   'PUT /events/:code/admins/:id': 'owner 任免活动管理员', 'POST /events/:code/owner-transfer': 'owner 转让；旧密钥和恢复授权失效',
   'POST /events/:code/preview': '只读分配预览', 'POST /events/:code/test-users': '创建测试成员',
   'POST /events/:code/test-games': '创建测试 Host 与桌游', 'POST /events/:code/test-fill': '均匀报名未报名测试成员',
+  'POST /events/:code/games/:id/test-users': '批量创建测试玩家并报名指定桌游，满员后进入候补',
+  'POST /events/:code/test-finalize': '模拟立即截止，保存正式分桌结果；重复调用不重新分配',
   'POST /events/:code/test-reuse': '复用当前 owner 池中的未关联测试身份',
   'POST /events/:code/test-users/:id/join': '模拟测试成员报名', 'POST /events/:code/test-users/:id/drop': '模拟测试成员退出',
   'DELETE /events/:code/test-users': '清除测试成员及其关联报名', 'DELETE /events/:code/test-event': '清除活动并保留测试身份供复用',

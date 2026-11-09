@@ -49,6 +49,8 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 | `POST /events/:code/preview` | 无或 `{}` | owner + 测试工具启用；只读分配预览，返回 `{games,unassigned,result}` |
 | `POST /events/:code/test-users` | `{count}`，1–30 | owner + 测试工具启用；活动内最多 50 个测试身份 |
 | `POST /events/:code/test-games` | 桌游字段 | owner + 测试工具启用；创建测试 Host 和其桌游 |
+| `POST /events/:code/games/:id/test-users` | `{count}`，1–30 | owner + 测试工具启用，报名期内；一次创建测试玩家并报名本活动指定桌游，满员后候补。返回 `{createdCount,participantIds,gameId,attendeeCount,waitlistCount}`，活动内最多 50 个测试身份（含 Host） |
+| `POST /events/:code/test-finalize` | 无或 `{}` | owner + 测试工具启用；须有至少一个桌游。模拟立即截止并复用正式结算，返回 `{result}`。保留 seed 及活动开始/结束时间，原截止尚未到达时改为当前时间；重复调用返回已保存汇总，不重新分配 |
 | `POST /events/:code/test-fill` | 无或 `{}` | owner + 测试工具启用；轮流向各桌报名未报名测试成员，返回 `{joinedCount,attendeeCount,waitlistCount}` |
 | `POST /events/:code/test-users/:id/join` | `{gameId}` | owner + 测试工具启用；模拟指定测试成员报名，返回 `{gameId,status}` |
 | `POST /events/:code/test-users/:id/drop` | 无或 `{}` | owner + 测试工具启用；模拟指定非 host 测试成员退出 |

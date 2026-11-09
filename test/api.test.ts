@@ -26,6 +26,8 @@ test('API schema is directly consumable and public files never expose server fil
   assert.equal(schema.openapi, '3.1.0');
   assert.equal(schema.data, undefined);
   assert.ok(schema.paths['/events/{code}/games'].post.requestBody);
+  assert.ok(schema.paths['/events/{code}/games/{id}/test-users'].post.requestBody);
+  assert.ok(schema.paths['/events/{code}/test-finalize'].post.responses['200']);
   assert.ok(schema.components.schemas.EventView);
   const script = await app.inject({ method: 'GET', url: '/app.js' });
   assert.equal(script.statusCode, 200);
@@ -390,6 +392,106 @@ test('test tools simulate users and hosted games, preserve real accounts, and ar
   assert.ok(success(await request('GET', '/session', real.cookie)).participant);
 });
 
+test('batch test players register only at the selected table and overflow becomes its waitlist', async () => {
+  const created = await createEvent();
+  const first = await game(created.code, created.cookie, 3);
+  const second = success(await request('POST', `/events/${created.code}/test-games`, created.cookie, { name: '另一个测试桌', capacity: 4 }));
+  const added = success(await request('POST', `/events/${created.code}/games/${first}/test-users`, created.cookie, { count: 5 }));
+  assert.equal(added.createdCount, 5);
+  assert.equal(added.attendeeCount, 2);
+  assert.equal(added.waitlistCount, 3);
+  const view = await snapshot(created.code);
+  const target = view.games.find((g: any) => g.id === first);
+  assert.equal(target.attendees.length, 3);
+  assert.equal(target.waitlist.length, 3);
+  assert.deepEqual(target.waitlist.map((p: any) => p.rank), [1, 2, 3]);
+  assert.equal(view.games.find((g: any) => g.id === second.gameId).attendees.length, 1);
+  const addedIds = new Set(added.participantIds);
+  assert.ok(view.members.filter((m: any) => addedIds.has(m.id)).every((m: any) => m.isTest));
+  assert.ok([...target.attendees.slice(1), ...target.waitlist].every((p: any) => addedIds.has(p.participantId)));
+});
+
+test('batch test player validation and event limits leave no partially created users or registrations', async () => {
+  const created = await createEvent();
+  const first = await game(created.code, created.cookie, 3);
+  const other = await createEvent();
+  const foreignGame = await game(other.code, other.cookie, 3);
+  for (const count of [0, -1, 31, 1.5, 'invalid']) {
+    const invalid = await request('POST', `/events/${created.code}/games/${first}/test-users`, created.cookie, { count });
+    assert.equal(invalid.status, 400);
+  }
+  assert.equal((await request('POST', `/events/${created.code}/games/${foreignGame}/test-users`, created.cookie, { count: 3 })).status, 404);
+  assert.equal((await snapshot(created.code)).members.filter((m: any) => m.isTest).length, 0);
+  success(await request('POST', `/events/${created.code}/test-users`, created.cookie, { count: 30 }));
+  success(await request('POST', `/events/${created.code}/test-users`, created.cookie, { count: 19 }));
+  const overflow = await request('POST', `/events/${created.code}/games/${first}/test-users`, created.cookie, { count: 2 });
+  assert.equal(overflow.status, 400);
+  const after = await snapshot(created.code);
+  assert.equal(after.members.filter((m: any) => m.isTest).length, 49);
+  assert.equal(after.games[0].attendees.length, 1);
+  assert.equal(after.games[0].waitlist.length, 0);
+});
+
+test('one-click test settlement matches preview, freezes registration and is idempotent before the scheduled deadline', async () => {
+  const created = await createEvent();
+  const full = await game(created.code, created.cookie, 1);
+  success(await request('POST', `/events/${created.code}/test-games`, created.cookie, { name: '接收候补的测试桌', capacity: 3 }));
+  success(await request('POST', `/events/${created.code}/games/${full}/test-users`, created.cookie, { count: 4 }));
+  const other = await createEvent();
+  const preview = success(await request('POST', `/events/${created.code}/preview`, created.cookie, {}));
+  assert.ok(now < Date.parse(created.event.registrationClosesAt));
+  const results = await Promise.all([
+    request('POST', `/events/${created.code}/test-finalize`, created.cookie, {}),
+    request('POST', `/events/${created.code}/test-finalize`, created.cookie, {}),
+  ]);
+  results.forEach((result) => assert.deepEqual(success(result).result, preview.result));
+  const view = await snapshot(created.code);
+  assert.equal(view.event.status, 'finalized');
+  assert.equal(view.event.isMutable, false);
+  assert.equal(Date.parse(view.event.registrationClosesAt), now);
+  assert.equal(view.event.startAt, created.event.startAt);
+  assert.equal(view.event.endAt, created.event.endAt);
+  assert.equal(view.event.result.assignedFromWaitlist, 2);
+  assert.equal(view.unassigned.length, 2);
+  const assignments = (data: any) => data.games.map((g: any) => ({ id: g.id, ids: g.attendees.map((p: any) => p.participantId).sort() }));
+  assert.deepEqual(assignments(view), assignments(preview));
+  assert.equal(view.games.reduce((n: number, g: any) => n + g.waitlist.length, 0), 0);
+  const late = await participant(created.code, '测试分桌后报名');
+  assert.equal((await join(created.code, full, late.cookie)).error.code, 'EVENT_CLOSED');
+  assert.equal((await request('POST', `/events/${created.code}/games/${full}/test-users`, created.cookie, { count: 1 })).error.code, 'EVENT_CLOSED');
+  success(await request('POST', `/events/${created.code}/test-finalize`, created.cookie, {}));
+  const again = await snapshot(created.code);
+  assert.equal(again.event.finalizedAt, view.event.finalizedAt);
+  assert.deepEqual(assignments(again), assignments(view));
+  assert.equal((await snapshot(other.code)).event.status, 'open');
+});
+
+test('test settlement rejects an empty event without changing its deadline', async () => {
+  const created = await createEvent();
+  assert.equal((await request('POST', `/events/${created.code}/test-finalize`, created.cookie, {})).status, 400);
+  const view = await snapshot(created.code);
+  assert.equal(view.event.status, 'open');
+  assert.equal(view.event.registrationClosesAt, created.event.registrationClosesAt);
+});
+
+test('batch test registration and early settlement require this event owner, including for admins', async () => {
+  const created = await createEvent();
+  const first = await game(created.code, created.cookie, 3);
+  const person = await participant(created.code, '测试功能权限检查');
+  const paths = [`/events/${created.code}/games/${first}/test-users`, `/events/${created.code}/test-finalize`];
+  for (const path of paths) {
+    assert.equal((await request('POST', path, '', { count: 1 })).status, 401);
+    assert.equal((await request('POST', path, person.cookie, { count: 1 })).status, 403);
+  }
+  success(await request('PUT', `/events/${created.code}/admins/${person.id}`, created.cookie, { isAdmin: true }));
+  const outsider = await createEvent();
+  for (const path of paths) {
+    assert.equal((await request('POST', path, person.cookie, { count: 1 })).status, 403);
+    assert.equal((await request('POST', path, outsider.cookie, { count: 1 })).status, 401);
+  }
+  assert.equal((await snapshot(created.code)).event.status, 'open');
+});
+
 test('test tools are rejected server-side when disabled', async () => {
   const isolated = await buildApp({ db: await openDatabase({ url: process.env.TEST_DATABASE_URL }), now: () => now, testTools: false, logger: false, publicOrigin: ORIGIN });
   try {
@@ -399,6 +501,9 @@ test('test tools are rejected server-side when disabled', async () => {
     assert.equal(view.testToolsEnabled, false);
     const attempt = await request('POST', `/events/${created.code}/test-users`, created.cookie, { count: 2 }, isolated);
     assert.ok(attempt.status === 403 || attempt.status === 404);
+    for (const path of [`/events/${created.code}/games/${randomUUID()}/test-users`, `/events/${created.code}/test-finalize`]) {
+      assert.equal((await request('POST', path, created.cookie, { count: 1 }, isolated)).status, 403);
+    }
   } finally { await isolated.close(); }
 });
 async function snapshotFor(target: App, code: string, cookie: string) { return success(await request('GET', `/events/${code}`, cookie, undefined, target)); }
