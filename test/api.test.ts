@@ -28,6 +28,9 @@ test('API schema is directly consumable and public files never expose server fil
   assert.ok(schema.paths['/events/{code}/games'].post.requestBody);
   assert.ok(schema.paths['/events/{code}/games/{id}/test-users'].post.requestBody);
   assert.ok(schema.paths['/events/{code}/test-finalize'].post.responses['200']);
+  const finalize = schema.paths['/events/{code}/finalize'].post;
+  assert.equal(finalize.responses['200'].content['application/json'].schema.properties.data.properties.result.$ref, '#/components/schemas/Result');
+  assert.deepEqual(finalize.tags, ['events']);
   assert.ok(schema.components.schemas.EventView);
   const script = await app.inject({ method: 'GET', url: '/app.js' });
   assert.equal(script.statusCode, 200);
@@ -283,6 +286,137 @@ test('at the exact deadline writes stop and reading results finalizes the event 
   const edit = await request('PATCH', `/events/${created.code}/games/${gameId}`, created.cookie, { name: '已截止', capacity: 3 });
   assert.equal(edit.error.code, 'EVENT_CLOSED');
   assert.ok((await request('DELETE', `/events/${created.code}`, created.cookie)).status >= 400);
+});
+
+test('owner can close early with the scheduled allocation rules, frozen results and idempotent concurrent requests', async () => {
+  const created = await createEvent();
+  const full = await game(created.code, created.cookie, 2, '主选桌');
+  const seated = await participant(created.code, '提前截止已入席');
+  success(await join(created.code, full, seated.cookie));
+  const secondHost = await participant(created.code, '提前截止空桌Host');
+  const receiving = await game(created.code, secondHost.cookie, 3, '接收候补桌');
+  for (let i = 0; i < 4; i++) {
+    const waiting = await participant(created.code, `提前截止候补${i}`);
+    success(await join(created.code, full, waiting.cookie));
+  }
+  const other = await createEvent();
+  const before = await snapshot(created.code);
+  const seed = (await app.db.query('SELECT seed FROM events WHERE code=$1', [created.code])).rows[0]!.seed;
+  const preview = success(await request('POST', `/events/${created.code}/preview`, created.cookie, {}));
+  assert.ok(now < Date.parse(created.event.registrationClosesAt));
+  const closedAt = now;
+  const responses = await Promise.all([
+    request('POST', `/events/${created.code}/finalize`, created.cookie, {}),
+    request('POST', `/events/${created.code}/finalize`, created.cookie),
+  ]);
+  responses.forEach((response) => assert.deepEqual(success(response).result, preview.result));
+  const view = await snapshot(created.code);
+  assert.equal(view.event.status, 'finalized');
+  assert.equal(view.event.isMutable, false);
+  assert.equal(Date.parse(view.event.registrationClosesAt), closedAt);
+  assert.equal(Date.parse(view.event.finalizedAt), closedAt);
+  assert.equal(view.event.startAt, created.event.startAt);
+  assert.equal(view.event.endAt, created.event.endAt);
+  assert.equal((await app.db.query('SELECT seed FROM events WHERE code=$1', [created.code])).rows[0]!.seed, seed);
+  const assignments = (data: any) => data.games.map((g: any) => ({ id: g.id, ids: g.attendees.map((p: any) => p.participantId).sort() }));
+  assert.deepEqual(assignments(view), assignments(preview));
+  assert.deepEqual(view.games.find((g: any) => g.id === full).attendees.map((p: any) => p.participantId), before.games[0].attendees.map((p: any) => p.participantId));
+  assert.equal(view.games.find((g: any) => g.id === receiving).attendees.length, 3);
+  assert.equal(view.event.result.assignedFromWaitlist, 2);
+  assert.equal(view.unassigned.length, 2);
+  assert.equal(view.games.reduce((n: number, g: any) => n + g.waitlist.length, 0), 0);
+  const late = await participant(created.code, '提前截止后报名');
+  const mutations = [
+    request('POST', `/events/${created.code}/games/${full}/registrations`, late.cookie, {}),
+    request('POST', `/events/${created.code}/games`, late.cookie, { name: '截止后开桌', capacity: 3 }),
+    request('PATCH', `/events/${created.code}/games/${full}`, created.cookie, { capacity: 3 }),
+    request('DELETE', `/events/${created.code}/games/${full}`, created.cookie),
+    request('DELETE', `/events/${created.code}/my-registration`, seated.cookie),
+    request('DELETE', `/events/${created.code}`, created.cookie),
+  ];
+  for (const mutation of await Promise.all(mutations)) assert.equal(mutation.error.code, 'EVENT_CLOSED');
+  success(await request('PATCH', `/events/${created.code}`, created.cookie, { title: '提前截止后更正展示信息' }));
+  now += 1000;
+  assert.deepEqual(success(await request('POST', `/events/${created.code}/finalize`, created.cookie, {})).result, preview.result);
+  await app.service.runHousekeeping();
+  const again = await snapshot(created.code);
+  assert.equal(again.event.finalizedAt, view.event.finalizedAt);
+  assert.equal(again.event.registrationClosesAt, view.event.registrationClosesAt);
+  assert.deepEqual(assignments(again), assignments(view));
+  assert.deepEqual(again.unassigned, view.unassigned);
+  assert.equal((await snapshot(other.code)).event.status, 'open');
+});
+
+test('early closure is owner-only and recovered owner authorization remains event-scoped', async () => {
+  const created = await createEvent();
+  const member = await participant(created.code, '提前截止权限检查');
+  const outsider = await createEvent();
+  success(await request('POST', `/events/${created.code}/members`, outsider.cookie, { displayName: '其他活动组织者' }));
+  const path = `/events/${created.code}/finalize`;
+  assert.equal((await request('POST', path)).status, 401);
+  assert.equal((await request('POST', path, member.cookie, { role: 'owner', participantId: created.event.ownerId })).status, 403);
+  assert.equal((await request('POST', path, outsider.cookie, {})).status, 403);
+  success(await request('PUT', `/events/${created.code}/admins/${member.id}`, created.cookie, { isAdmin: true }));
+  assert.equal((await request('POST', path, member.cookie, {})).status, 403);
+  assert.equal((await snapshot(created.code)).event.registrationClosesAt, created.event.registrationClosesAt);
+  assert.equal((await snapshot(created.code)).event.status, 'open');
+  success(await request('POST', `/events/${created.code}/manage`, outsider.cookie, { managementKey: created.key }));
+  success(await request('POST', path, outsider.cookie, {}));
+  assert.equal((await snapshot(created.code)).event.status, 'finalized');
+  assert.equal((await snapshot(outsider.code)).event.status, 'open');
+});
+
+test('normal early closure is available with test tools disabled and empty events settle as at their deadline', async () => {
+  const isolated = await buildApp({ db: await openDatabase({ url: process.env.TEST_DATABASE_URL }), now: () => now, testTools: false, logger: false, publicOrigin: ORIGIN });
+  try {
+    await isolated.ready();
+    const created = await createEvent(isolated);
+    const result = success(await request('POST', `/events/${created.code}/finalize`, created.cookie, {}, isolated)).result;
+    assert.deepEqual(result, { gameCount: 0, attendeeCount: 0, assignedFromWaitlist: 0, unassignedCount: 0 });
+    const view = await snapshotFor(isolated, created.code, created.cookie);
+    assert.equal(view.testToolsEnabled, false);
+    assert.equal(view.event.status, 'finalized');
+    assert.equal(view.event.isMutable, false);
+    assert.equal(Date.parse(view.event.registrationClosesAt), now);
+  } finally { await isolated.close(); }
+});
+
+test('manual settlement after the deadline preserves the original closing time and saved results', async () => {
+  const created = await createEvent();
+  await game(created.code, created.cookie, 2);
+  now = Date.parse(created.event.registrationClosesAt) + 1;
+  const result = success(await request('POST', `/events/${created.code}/finalize`, created.cookie, {})).result;
+  assert.equal(result.attendeeCount, 1);
+  const view = await snapshot(created.code);
+  assert.equal(view.event.registrationClosesAt, created.event.registrationClosesAt);
+  assert.equal(view.event.status, 'finalized');
+  assert.deepEqual(view.event.result, result);
+  now += 1000;
+  success(await request('POST', `/events/${created.code}/finalize`, created.cookie, {}));
+  assert.equal((await snapshot(created.code)).event.finalizedAt, view.event.finalizedAt);
+});
+
+test('registration racing manual closure is either included in the frozen snapshot or rejected', async () => {
+  const created = await createEvent();
+  const gameId = await game(created.code, created.cookie, 2);
+  const candidate = await participant(created.code, '与提前截止并发报名');
+  const [closing, registration] = await Promise.all([
+    request('POST', `/events/${created.code}/finalize`, created.cookie, {}),
+    join(created.code, gameId, candidate.cookie),
+  ]);
+  const result = success(closing).result;
+  const view = await snapshot(created.code, candidate.cookie);
+  assert.equal(view.event.status, 'finalized');
+  if (registration.status === 200) {
+    assert.equal(result.attendeeCount, 2);
+    assert.equal(view.registration.finalGameId, gameId);
+    assert.equal(view.registration.allocationReason, 'primary');
+  } else {
+    assert.equal(registration.error.code, 'EVENT_CLOSED');
+    assert.equal(result.attendeeCount, 1);
+    assert.equal(view.registration, null);
+  }
+  assert.equal((await join(created.code, gameId, candidate.cookie)).error.code, 'EVENT_CLOSED');
 });
 
 test('a registration waiting behind another transaction cannot slip past the deadline', async () => {

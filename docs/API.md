@@ -37,6 +37,7 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 | `POST /events/:code/members` | `{displayName}` | 创建/使用匿名会话，将该身份加入本活动或更新活动内显示名；返回 `{joined:true}` |
 | `PATCH /events/:code` | 可修改的活动字段 | owner/admin；返回 `{updated:true}` |
 | `DELETE /events/:code` | 无 | owner/admin，且报名期内；级联删除活动，返回 `{deleted:true}` |
+| `POST /events/:code/finalize` | 无或 `{}` | owner；正式环境可用，无需测试开关。立即截止并按自然到期规则结算，返回 `{result}`。保留已入席成员、seed 及活动起止时间；截止未到时改为当前时间，冻结报名与桌游，允许无桌游活动。重复调用返回已保存汇总，不重新分配 |
 | `POST /events/:code/manage` | `{managementKey,displayName?}` | 持有密钥；恢复本活动 owner 身份，必要时建立基础会话；返回 `{recovered:true}` |
 | `POST /events/:code/management-key` | 无或 `{}` | owner；轮换密钥并撤销其他恢复授权，返回 `{managementKey}` |
 | `PUT /events/:code/admins/:id` | `{isAdmin:true}` 或 `{isAdmin:false}` | owner；目标是本活动真实成员且不是 owner，返回 `{updated:true}` |

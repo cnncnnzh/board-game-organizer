@@ -91,6 +91,7 @@ export async function buildApp(options: {
   route('POST', '/events/:code/members', async (req, reply) => app.service.joinEvent(params(req).code!, await ensureIdentity(req, reply), body(req)));
   route('PATCH', '/events/:code', async (req) => app.service.updateEvent(params(req).code!, actor(req), body(req)));
   route('DELETE', '/events/:code', async (req) => app.service.deleteEvent(params(req).code!, actor(req)));
+  route('POST', '/events/:code/finalize', async (req) => app.service.finalizeEvent(params(req).code!, actor(req)));
   route('POST', '/events/:code/games', async (req) => app.service.createGame(params(req).code!, actor(req), body(req)));
   route('PATCH', '/events/:code/games/:id', async (req) => app.service.updateGame(params(req).code!, params(req).id!, actor(req), body(req)));
   route('DELETE', '/events/:code/games/:id', async (req) => app.service.deleteGame(params(req).code!, params(req).id!, actor(req)));

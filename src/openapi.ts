@@ -94,7 +94,7 @@ function responseSchema(method: string, path: string): Schema {
   if (path.endsWith('/management-key')) return ref('ManagementKeyEnvelope');
   if (path.endsWith('/owner-transfer')) return envelope(object({ ownerId: id }));
   if (path.endsWith('/preview')) return ref('PreviewEnvelope');
-  if (path.endsWith('/test-finalize')) return envelope(object({ result: ref('Result') }));
+  if (path.endsWith('/finalize') || path.endsWith('/test-finalize')) return envelope(object({ result: ref('Result') }));
   if (method === 'POST' && path === '/events/:code/games/:id/test-users') return envelope(object({
     createdCount: count, participantIds: list(id), gameId: id, attendeeCount: count, waitlistCount: count,
   }));
@@ -106,6 +106,7 @@ const summaries: Record<string, string> = {
   'GET /events/resolve/:code': '解析活动码', 'GET /events/:code': '读取活动、名单及自己的状态',
   'GET /events/:code/results': '读取结果；已到期时补做结算', 'POST /events/:code/members': '填写姓名加入活动或更名',
   'PATCH /events/:code': 'owner/admin 编辑活动', 'DELETE /events/:code': 'owner/admin 删除报名期活动',
+  'POST /events/:code/finalize': 'owner 立即截止并保存正式分桌结果；重复调用不重新分配',
   'POST /events/:code/games': '成员开桌，host 自动入席', 'PATCH /events/:code/games/:id': 'host 编辑桌游，扩容自动补位',
   'DELETE /events/:code/games/:id': 'host 删桌并释放全部报名', 'POST /events/:code/games/:id/registrations': '报名主选桌或进入候补',
   'DELETE /events/:code/my-registration': '退出自己的非 host 报名并晋级候补',
