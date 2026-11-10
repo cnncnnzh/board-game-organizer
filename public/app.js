@@ -170,6 +170,15 @@ function renderPreview() {
   return `<div class="preview-panel"><h3>分配预览</h3><p class="help">基于当前数据；之后的报名变化可能改变正式结果。</p>${(p.games || []).map((game) => `<h3>${esc(game.name)} · ${(game.attendees || []).length}/${esc(game.capacity)}</h3>${names(game.attendees)}`).join('')}<h3>未分配</h3>${names(p.unassigned)}</div>`;
 }
 
+function renderRegistrationResult() {
+  const { event, games = [], unassigned = [] } = state.details;
+  if (event.status !== 'finalized' || !games.length) return '';
+  const mentions = (members) => members.map(({ displayName }) => displayName.startsWith('@') ? displayName : `@${displayName}`).join(', ');
+  const lines = games.map((game) => `${game.name}：${mentions(game.attendees)}`);
+  if (unassigned.length) lines.push(`未分配：${mentions(unassigned)}`);
+  return `<section class="panel registration-result"><h2 id="registration-result-title">报名结果</h2><p id="registration-result-help" class="help">每桌一行，包含 Host；可复制后发到群里。未分配人员单独列出。</p><textarea id="registration-result" readonly rows="${Math.min(12, Math.max(3, lines.length))}" aria-labelledby="registration-result-title" aria-describedby="registration-result-help">${esc(lines.join('\n'))}</textarea><button type="button" class="button button-primary" data-action="copy-result">复制报名结果</button></section>`;
+}
+
 function managementKey() {
   if (state.secret?.code === state.code) return state.secret.key;
   try { return sessionStorage.getItem(`organizer-key:${state.code}`) || ''; } catch { return ''; }
@@ -184,7 +193,7 @@ function renderEvent() {
     <div class="event-tools"><div class="button-row"><span class="badge ${closed ? 'badge-closed' : ''}">${event.status === 'finalized' ? '分桌完成' : closed ? '报名已截止' : '正在报名'}</span><span class="tiny muted">${closed ? '报名截止' : '报名截至'} ${esc(dateText(event.registrationClosesAt, event.timeZone))}</span>${event.role === 'owner' && !closed ? '<button class="button button-yellow button-small" data-action="finalize">提前截止并分配</button>' : ''}</div><div class="button-row"><button class="button button-secondary button-small" data-action="copy-link">复制邀请链接</button><button class="button button-secondary button-small" data-action="copy-code">复制活动码</button><button class="button button-secondary button-small" data-action="refresh">刷新</button></div></div>
     ${key ? `<section class="secret-panel"><h2>请保存你的组织者恢复密钥</h2><p>当前浏览器已拥有管理权限。换浏览器时可用此密钥恢复管理，请单独保存，只分享给可信任的组织者。</p><code class="secret-key">${esc(key)}</code><div class="button-row"><button class="button button-yellow button-small" data-action="copy-key">复制恢复密钥</button><button class="button button-secondary button-small" data-action="hide-key">已保存，隐藏密钥</button></div></section>` : ''}
     ${renderIdentity()}${renderMyStatus()}
-    ${event.status === 'finalized' && event.result ? `<div class="result-summary"><span class="result-stat"><strong>${esc(event.result.attendeeCount ?? games.reduce((n, game) => n + (game.attendees?.length || 0), 0))}</strong>人入席</span><span class="result-stat"><strong>${esc(event.result.assignedFromWaitlist || 0)}</strong>人从候补分配</span><span class="result-stat"><strong>${esc(event.result.unassignedCount || 0)}</strong>人未分配</span></div>` : ''}
+    ${renderRegistrationResult()}
     <div class="section-top"><h2>${event.status === 'finalized' ? '最终桌游分配' : '这次玩什么'} <span class="badge">${games.length} 桌</span></h2></div><p class="section-note">${event.status === 'finalized' ? '名单已固定。活动结束 24 小时后，本活动及报名数据将自动删除。' : '每人只能选择一桌，人数包含 Host。候补会在有空位时自动晋级。'}</p>
     ${games.length ? `<div class="game-grid">${games.map(renderGame).join('')}</div>` : '<div class="empty">还没有桌游。带上一款喜欢的游戏，来当第一位 Host 吧。</div>'}
     ${mutable() && !state.details.registration ? `<details class="panel create-game"><summary>我来开一桌</summary><form data-form="create-game" class="form-stack">${gameFields()}<p class="help">创建后你会自动成为 Host 并占一个席位。每人只能报名或主持一桌。</p><button class="button button-primary" type="submit">创建桌游，成为 Host</button></form></details>` : ''}
@@ -343,9 +352,15 @@ root.addEventListener('submit', (event) => {
   });
 });
 
-async function copy(text, label) {
+async function copy(text, label, field) {
   if (navigator.clipboard?.writeText) {
     try { await navigator.clipboard.writeText(text); message(`${label}已复制。`); return; } catch { /* Fall back to selectable text. */ }
+  }
+  if (field) {
+    field.focus();
+    field.select();
+    message(`无法自动复制，已选中${label}，请长按或按 Ctrl+C / Command+C 复制。`);
+    return;
   }
   message(`请手动复制${label}：${text}`);
 }
@@ -372,6 +387,10 @@ root.addEventListener('click', (event) => {
     if (action === 'copy-link') return copy(`${location.origin}/events/${state.code}`, '邀请链接');
     if (action === 'copy-code') return copy(state.code, '活动码');
     if (action === 'copy-key') return copy(managementKey(), '组织者恢复密钥');
+    if (action === 'copy-result') {
+      const field = document.querySelector('#registration-result');
+      return copy(field.value, '报名结果', field);
+    }
     if (action === 'hide-key') {
       try { sessionStorage.removeItem(`organizer-key:${state.code}`); } catch { /* No storage to clear. */ }
       state.secret = null;
@@ -424,7 +443,7 @@ root.addEventListener('click', (event) => {
       const { result } = await api(`/events/${state.code}/${action}`, 'POST', {});
       await refresh({ expandGames: true });
       message(`${action === 'finalize' ? '已截止并完成分配' : '测试分配已完成'}：${result.attendeeCount} 人入席，${result.assignedFromWaitlist} 人从候补分配，${result.unassignedCount} 人未分配。`);
-      document.querySelector('.result-summary')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      document.querySelector('.registration-result')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
       return;
     } else if (action === 'preview') {
       state.preview = await api(`/events/${state.code}/preview`, 'POST', {});
