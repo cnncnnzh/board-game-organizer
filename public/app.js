@@ -104,7 +104,8 @@ function renderGame(game) {
   const mine = state.details.registration;
   const isHost = game.isHost || game.hostId === state.participant?.id;
   const expanded = state.expandedGames.has(game.id);
-  return `<article class="game-card"><div class="game-header"><div><h3>${esc(game.name)}</h3>${game.difficulty ? `<span class="game-difficulty">${esc(game.difficulty)}</span>` : ''}</div><button type="button" class="seat-count" data-action="toggle-roster" data-id="${esc(game.id)}" aria-expanded="${expanded}" aria-controls="game-roster-${esc(game.id)}" aria-label="${esc(game.name)}：${game.attendees?.length || 0} / ${esc(game.capacity)} 人，Host 和参与者"><span class="seat-chevron" aria-hidden="true">&gt;</span><span>${game.attendees?.length || 0}<span class="muted"> / ${esc(game.capacity)}</span></span></button></div>
+  const participantCount = (game.attendees?.length || 0) + (game.waitlist?.length || 0);
+  return `<article class="game-card"><div class="game-header"><div><h3>${esc(game.name)}</h3>${game.difficulty ? `<span class="game-difficulty">${esc(game.difficulty)}</span>` : ''}</div><button type="button" class="seat-count" data-action="toggle-roster" data-id="${esc(game.id)}" aria-expanded="${expanded}" aria-controls="game-roster-${esc(game.id)}" aria-label="${esc(game.name)}：${participantCount} / ${esc(game.capacity)} 人（含候补），Host 和参与者"><span class="seat-chevron" aria-hidden="true">&gt;</span><span>${participantCount}<span class="muted"> / ${esc(game.capacity)}</span></span></button></div>
     <div id="game-roster-${esc(game.id)}" class="game-roster"${expanded ? '' : ' hidden'}>
       <p class="game-host">Host · ${esc(game.hostName || '—')}</p>
       <div><span class="member-label">已入席${isHost ? ' · 你是 Host' : ''}</span>${names(game.attendees)}</div>
