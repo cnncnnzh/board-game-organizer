@@ -27,6 +27,10 @@ test('API schema is directly consumable and public files never expose server fil
   assert.equal(schema.data, undefined);
   assert.ok(schema.paths['/events/{code}/games'].post.requestBody);
   assert.ok(schema.paths['/events/{code}/games/{id}/test-users'].post.requestBody);
+  const secondChoiceSchema = schema.paths['/events/{code}/my-registration'].patch;
+  assert.deepEqual(secondChoiceSchema.requestBody.content['application/json'].schema.required, ['secondaryGameId']);
+  assert.ok(schema.components.schemas.MyRegistration);
+  assert.equal(schema.components.schemas.Registration.properties.secondaryGameId, undefined);
   assert.ok(schema.paths['/events/{code}/test-finalize'].post.responses['200']);
   const finalize = schema.paths['/events/{code}/finalize'].post;
   assert.equal(finalize.responses['200'].content['application/json'].schema.properties.data.properties.result.$ref, '#/components/schemas/Result');
@@ -91,6 +95,215 @@ async function game(code: string, cookie: string, capacity: number, name = '卡�
 }
 async function snapshot(code: string, cookie = '') { return success(await request('GET', `/events/${code}`, cookie)); }
 async function join(code: string, gameId: string, cookie: string) { return request('POST', `/events/${code}/games/${gameId}/registrations`, cookie, {}); }
+async function secondChoice(code: string, cookie: string, secondaryGameId: string | null) {
+  return request('PATCH', `/events/${code}/my-registration`, cookie, { secondaryGameId });
+}
+
+test('waitlisted players can save, change and cancel private second choices including full tables without changing counts', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 1, '第一选择');
+  const fullHost = await participant(created.code, '第二选择满桌Host');
+  const openHost = await participant(created.code, '第二选择空桌Host');
+  const full = await game(created.code, fullHost.cookie, 1, '可选满桌');
+  const open = await game(created.code, openHost.cookie, 4, '可选空桌');
+  const player = await participant(created.code, '第二选择玩家');
+  success(await join(created.code, primary, player.cookie));
+  const before = await snapshot(created.code);
+  assert.equal((await snapshot(created.code, player.cookie)).registration.secondaryGameId, null);
+  assert.deepEqual(success(await secondChoice(created.code, player.cookie, full)), { secondaryGameId: full });
+  let mine = await snapshot(created.code, player.cookie);
+  assert.equal(mine.registration.secondaryGameId, full);
+  assert.equal(mine.registration.primaryGameId, primary);
+  assert.equal(mine.registration.status, 'waitlist');
+  assert.deepEqual(mine.games, before.games);
+  for (const cookie of ['', created.cookie, fullHost.cookie, openHost.cookie, player.cookie]) {
+    const view = await snapshot(created.code, cookie);
+    assert.ok(!JSON.stringify({ games: view.games, members: view.members, unassigned: view.unassigned }).includes('secondaryGameId'));
+    if (cookie !== player.cookie && view.registration) assert.equal(view.registration.secondaryGameId, null);
+  }
+  success(await secondChoice(created.code, player.cookie, open));
+  mine = await snapshot(created.code, player.cookie);
+  assert.equal(mine.registration.secondaryGameId, open);
+  assert.equal(mine.registration.status, 'waitlist', 'an open second-choice table does not immediately seat the player');
+  assert.deepEqual(mine.games, before.games);
+  success(await secondChoice(created.code, player.cookie, null));
+  assert.equal((await snapshot(created.code, player.cookie)).registration.secondaryGameId, null);
+  assert.deepEqual((await snapshot(created.code)).games, before.games);
+});
+
+test('second-choice writes validate waitlist status, event scope and inputs and cannot target another player', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 1);
+  const host = await participant(created.code, '校验第二桌Host');
+  const secondary = await game(created.code, host.cookie, 2);
+  const seated = await participant(created.code, '已入席不能第二选择');
+  success(await join(created.code, secondary, seated.cookie));
+  const player = await participant(created.code, '校验候补');
+  success(await join(created.code, primary, player.cookie));
+  const unregistered = await participant(created.code, '未报名不能第二选择');
+  const other = await createEvent();
+  const foreign = await game(other.code, other.cookie, 2);
+  const path = `/events/${created.code}/my-registration`;
+  assert.equal((await request('PATCH', path, '', { secondaryGameId: secondary })).status, 401);
+  assert.equal((await secondChoice(created.code, other.cookie, secondary)).status, 401);
+  assert.equal((await secondChoice(created.code, unregistered.cookie, secondary)).status, 404);
+  for (const cookie of [created.cookie, seated.cookie]) {
+    assert.equal((await secondChoice(created.code, cookie, secondary)).error.code, 'NOT_WAITLISTED');
+  }
+  for (const payload of [{}, { secondaryGameId: '' }, { secondaryGameId: ' ' }, { secondaryGameId: true }, { secondaryGameId: {} }, { secondaryGameId: primary }]) {
+    assert.equal((await request('PATCH', path, player.cookie, payload)).error.code, 'INVALID_INPUT');
+  }
+  for (const id of [foreign, randomUUID()]) assert.equal((await secondChoice(created.code, player.cookie, id)).status, 404);
+  success(await request('PATCH', path, player.cookie, { secondaryGameId: secondary, participantId: seated.id }));
+  assert.equal((await snapshot(created.code, player.cookie)).registration.secondaryGameId, secondary);
+  assert.equal((await snapshot(created.code, seated.cookie)).registration.secondaryGameId, null);
+  await assert.rejects(app.db.query('UPDATE registrations SET secondary_game_id=$1 WHERE event_id=$2 AND participant_id=$3',
+    [foreign, created.event.id, player.id]), (error: any) => error.code === '23503');
+  await assert.rejects(app.db.query('UPDATE registrations SET secondary_game_id=primary_game_id WHERE event_id=$1 AND participant_id=$2',
+    [created.event.id, player.id]), (error: any) => error.code === '23514');
+});
+
+test('FIFO promotion and capacity increases clear second choices, and dropped players rejoin without an old choice', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 2);
+  const host = await participant(created.code, '清除第二选择Host');
+  const secondary = await game(created.code, host.cookie, 4);
+  const seated = await participant(created.code, '清除第二选择入席');
+  const first = await participant(created.code, '清除第二选择候补一');
+  const next = await participant(created.code, '清除第二选择候补二');
+  for (const player of [seated, first, next]) success(await join(created.code, primary, player.cookie));
+  for (const player of [first, next]) success(await secondChoice(created.code, player.cookie, secondary));
+  success(await request('DELETE', `/events/${created.code}/my-registration`, seated.cookie));
+  const promoted = (await snapshot(created.code, first.cookie)).registration;
+  assert.equal(promoted.status, 'attendee');
+  assert.equal(promoted.secondaryGameId, null);
+  assert.equal((await snapshot(created.code, next.cookie)).registration.secondaryGameId, secondary);
+  success(await request('PATCH', `/events/${created.code}/games/${primary}`, created.cookie, { capacity: 3 }));
+  assert.equal((await snapshot(created.code, next.cookie)).registration.status, 'attendee');
+  assert.equal((await snapshot(created.code, next.cookie)).registration.secondaryGameId, null);
+  const dropped = await participant(created.code, '退出清除第二选择');
+  success(await join(created.code, primary, dropped.cookie));
+  success(await secondChoice(created.code, dropped.cookie, secondary));
+  success(await request('DELETE', `/events/${created.code}/my-registration`, dropped.cookie));
+  success(await join(created.code, primary, dropped.cookie));
+  assert.equal((await snapshot(created.code, dropped.cookie)).registration.secondaryGameId, null);
+});
+
+test('deleting a second-choice table only clears the preference while deleting the primary releases the registration', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 1);
+  const host = await participant(created.code, '删除第二桌Host');
+  const secondary = await game(created.code, host.cookie, 2);
+  const player = await participant(created.code, '删除第二桌候补');
+  success(await join(created.code, primary, player.cookie));
+  success(await secondChoice(created.code, player.cookie, secondary));
+  success(await request('DELETE', `/events/${created.code}/games/${secondary}`, host.cookie));
+  const view = await snapshot(created.code, player.cookie);
+  assert.equal(view.registration.primaryGameId, primary);
+  assert.equal(view.registration.status, 'waitlist');
+  assert.equal(view.registration.secondaryGameId, null);
+  assert.equal(view.games[0].waitlist[0].participantId, player.id);
+  const replacement = await game(created.code, host.cookie, 2);
+  success(await secondChoice(created.code, player.cookie, replacement));
+  success(await request('DELETE', `/events/${created.code}/games/${primary}`, created.cookie));
+  assert.equal((await snapshot(created.code, player.cookie)).registration, null);
+  assert.equal((await snapshot(created.code)).games[0].attendees.length, 1);
+});
+
+test('second-choice lotteries precede balancing in preview, natural closure, early closure and test closure with frozen results', async () => {
+  for (const mode of ['natural', 'early', 'test']) {
+    const created = await createEvent();
+    const primary = await game(created.code, created.cookie, 1, '主选满桌');
+    const preferredHost = await participant(created.code, '优先桌Host');
+    const fallbackHost = await participant(created.code, '均衡桌Host');
+    const fullHost = await participant(created.code, '满员第二选择Host');
+    const preferred = await game(created.code, preferredHost.cookie, 3, '第二选择优先桌');
+    const fallback = await game(created.code, fallbackHost.cookie, 4, '剩余候补均衡桌');
+    const fullSecond = await game(created.code, fullHost.cookie, 1, '已满员第二选择');
+    const seated = await participant(created.code, '优先桌原成员');
+    success(await join(created.code, preferred, seated.cookie));
+    const interested = [];
+    for (let i = 0; i < 3; i++) {
+      const player = await participant(created.code, `第二选择竞争${i}`);
+      success(await join(created.code, primary, player.cookie));
+      success(await secondChoice(created.code, player.cookie, preferred));
+      interested.push(player);
+    }
+    for (const name of ['没选第二选择', '第二选择满员']) {
+      const player = await participant(created.code, name);
+      success(await join(created.code, primary, player.cookie));
+      if (name === '第二选择满员') success(await secondChoice(created.code, player.cookie, fullSecond));
+    }
+    const preview = success(await request('POST', `/events/${created.code}/preview`, created.cookie, {}));
+    assert.deepEqual(success(await request('POST', `/events/${created.code}/preview`, created.cookie, {})), preview);
+    const before = await snapshot(created.code, interested[0]!.cookie);
+    assert.equal(before.registration.secondaryGameId, preferred);
+    assert.equal(before.registration.status, 'waitlist');
+    assert.equal(before.event.status, 'open');
+    const preferredResult = preview.games.find((g: any) => g.id === preferred);
+    assert.equal(preferredResult.attendees.length, 3);
+    assert.equal(preferredResult.attendees.filter((p: any) => interested.some((candidate) => candidate.id === p.participantId)).length, 1);
+    if (mode === 'natural') now = Date.parse(created.event.registrationClosesAt);
+    else success(await request('POST', `/events/${created.code}/${mode === 'early' ? 'finalize' : 'test-finalize'}`, created.cookie, {}));
+    const finalized = await snapshot(created.code);
+    const assignments = (view: any) => view.games.map((g: any) => ({ id: g.id, players: g.attendees.map((p: any) => p.participantId).sort() }));
+    assert.deepEqual(assignments(finalized), assignments(preview));
+    assert.deepEqual(finalized.event.result, preview.result);
+    assert.equal(finalized.event.result.assignedFromWaitlist, 4);
+    assert.equal(finalized.event.result.unassignedCount, 1);
+    assert.equal(finalized.games.find((g: any) => g.id === fallback).attendees.length, 4);
+    for (const id of [preferred, null]) assert.equal((await secondChoice(created.code, interested[0]!.cookie, id)).error.code, 'EVENT_CLOSED');
+    success(await request('POST', `/events/${created.code}/finalize`, created.cookie, {}));
+    assert.deepEqual(assignments(await snapshot(created.code)), assignments(finalized));
+  }
+});
+
+test('a second-choice update racing closure is either included atomically or rejected', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 1);
+  const preferredHost = await participant(created.code, '并发第二选择Host');
+  const fallbackHost = await participant(created.code, '并发均衡Host');
+  const preferred = await game(created.code, preferredHost.cookie, 4);
+  const fallback = await game(created.code, fallbackHost.cookie, 2);
+  const seated = await participant(created.code, '并发原入席');
+  success(await join(created.code, preferred, seated.cookie));
+  const player = await participant(created.code, '并发第二选择玩家');
+  success(await join(created.code, primary, player.cookie));
+  const [updated, closed] = await Promise.all([
+    secondChoice(created.code, player.cookie, preferred),
+    request('POST', `/events/${created.code}/finalize`, created.cookie, {}),
+  ]);
+  success(closed);
+  const view = await snapshot(created.code, player.cookie);
+  assert.equal(view.registration.finalGameId, updated.status === 200 ? preferred : fallback);
+  if (updated.status !== 200) assert.equal(updated.error.code, 'EVENT_CLOSED');
+});
+
+test('a second-choice update waiting for the event lock rechecks the exact deadline', async () => {
+  const created = await createEvent();
+  const primary = await game(created.code, created.cookie, 1);
+  const host = await participant(created.code, '第二选择截止Host');
+  const secondary = await game(created.code, host.cookie, 2);
+  const player = await participant(created.code, '第二选择截止候补');
+  success(await join(created.code, primary, player.cookie));
+  let signalAcquired!: () => void;
+  let releaseLock!: () => void;
+  const acquired = new Promise<void>((resolve) => { signalAcquired = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const blocker = app.db.transaction(async (tx) => {
+    await tx.query('SELECT id FROM events WHERE code=$1 FOR UPDATE', [created.code]);
+    signalAcquired();
+    await gate;
+  });
+  await acquired;
+  const pending = secondChoice(created.code, player.cookie, secondary);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  now = Date.parse(created.event.registrationClosesAt);
+  releaseLock();
+  await blocker;
+  assert.equal((await pending).error.code, 'EVENT_CLOSED');
+  assert.equal((await snapshot(created.code, player.cookie)).registration.secondaryGameId, null);
+});
 
 test('home is public, event creation is anonymous, and codes resolve without exposing organizer secrets', async () => {
   const home = await app.inject({ method: 'GET', url: '/' });

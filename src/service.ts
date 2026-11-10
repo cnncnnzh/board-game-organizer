@@ -102,7 +102,7 @@ export class EventService {
       games: games.map((g) => ({ id: g.id, name: g.name, capacity: g.capacity,
         attendees: registrations.filter((r) => r.status === 'attendee' && (r.final_game_id || r.primary_game_id) === g.id)
           .map((r) => ({ participantId: r.participant_id })) })),
-      registrations: registrations.map((r) => ({ participantId: r.participant_id, status: r.status })), seed: event.seed,
+      registrations: registrations.map((r) => ({ participantId: r.participant_id, status: r.status, secondaryGameId: r.secondary_game_id })), seed: event.seed,
     });
   }
   private summary(games: Row[], registrations: Row[]) {
@@ -165,7 +165,7 @@ export class EventService {
       return {
         event: this.eventDto(event, role), currentParticipantId: member?.participant_id ?? null,
         participant: member ? { id: member.participant_id, displayName: member.display_name } : null,
-        registration: myRegistration ? registrationDto(myRegistration) : null,
+        registration: myRegistration ? { ...registrationDto(myRegistration), secondaryGameId: myRegistration.secondary_game_id } : null,
         games: games.map((g) => ({ id: g.id, name: g.name, capacity: g.capacity, description: g.description, difficulty: g.difficulty,
           hostId: g.host_id, hostName: byId.get(g.host_id)?.display_name ?? '', isHost: g.host_id === member?.participant_id,
           attendees: registrations.filter((r) => r.status === 'attendee' && (r.final_game_id || r.primary_game_id) === g.id).map(registrationDto),
@@ -227,7 +227,7 @@ export class EventService {
     const rows = (await tx.query("SELECT id,status FROM registrations WHERE event_id=$1 AND primary_game_id=$2 ORDER BY id", [eventId, gameId])).rows;
     const available = Math.max(0, capacity - rows.filter((r) => r.status === 'attendee').length);
     const waiting = rows.filter((r) => r.status === 'waitlist').slice(0, available);
-    for (const r of waiting) await tx.query("UPDATE registrations SET status='attendee' WHERE id=$1", [r.id]);
+    for (const r of waiting) await tx.query("UPDATE registrations SET status='attendee',secondary_game_id=NULL WHERE id=$1", [r.id]);
     return waiting.length;
   }
   async updateGame(code: string, gameId: string, actor: Actor, payload: Row) {
@@ -271,6 +271,25 @@ export class EventService {
     return this.db.transaction(async (tx) => {
       const event = await this.locked(tx, code);
       return this.joinGameInTx(tx, event, await this.requireMember(tx, event, actor), gameId);
+    });
+  }
+  async updateSecondChoice(code: string, actor: Actor, secondaryGameId: unknown) {
+    return this.db.transaction(async (tx) => {
+      const event = await this.locked(tx, code);
+      this.mutable(event);
+      const member = await this.requireMember(tx, event, actor);
+      const registration = (await tx.query('SELECT * FROM registrations WHERE event_id=$1 AND participant_id=$2',
+        [event.id, member.participant_id])).rows[0];
+      assert(registration, 'NOT_FOUND', '你还没有报名', 404);
+      assert(registration.status === 'waitlist', 'NOT_WAITLISTED', '只有候补玩家可以设置第二选择', 409);
+      assert(secondaryGameId === null || (typeof secondaryGameId === 'string' && secondaryGameId.trim().length > 0),
+        'INVALID_INPUT', '请选择第二选择桌游，或设为 null 取消');
+      if (secondaryGameId !== null) {
+        assert(secondaryGameId !== registration.primary_game_id, 'INVALID_INPUT', '第二选择不能与第一选择相同');
+        await this.requireGame(tx, event.id, secondaryGameId as string);
+      }
+      await tx.query('UPDATE registrations SET secondary_game_id=$1 WHERE id=$2', [secondaryGameId, registration.id]);
+      return { secondaryGameId };
     });
   }
   private async dropInTx(tx: Queryable, event: Row, member: Row) {

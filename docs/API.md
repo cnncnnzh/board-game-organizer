@@ -46,6 +46,7 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 | `PATCH /events/:code/games/:id` | 可修改的桌游字段 | host，报名期内；扩容后补位，返回 `{gameId,promotedCount}` |
 | `DELETE /events/:code/games/:id` | 无 | host，报名期内；释放该桌全部报名，返回 `{deleted:true}` |
 | `POST /events/:code/games/:id/registrations` | 无或 `{}` | member，报名期内；返回 `{gameId,status}`，status 为 `attendee` 或 `waitlist` |
+| `PATCH /events/:code/my-registration` | `{secondaryGameId}`，桌游 ID 或 `null` | 当前玩家须为候补，报名期内；设置、修改或取消第二选择，返回 `{secondaryGameId}`。可选满员桌，但不能与第一选择相同或选择其他活动的桌 |
 | `DELETE /events/:code/my-registration` | 无 | member，报名期内且不是 host；返回 `{dropped:true,promotedCount}` |
 | `POST /events/:code/preview` | 无或 `{}` | owner + 测试工具启用；只读分配预览，返回 `{games,unassigned,result}` |
 | `POST /events/:code/test-users` | `{count}`，1–30 | owner + 测试工具启用；活动内最多 50 个测试身份 |
@@ -116,6 +117,10 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 
 普通报名返回 `attendee` 或 `waitlist`。退出入席或扩容时按注册顺序晋级候补，`promotedCount` 是晋级人数；缩容不能低于当前入席人数。
 
+候补玩家可通过 `PATCH /events/:code/my-registration` 设置可选的第二选择；传 `{"secondaryGameId":null}` 取消。第二选择不创建额外报名、不加入目标桌人数或名单，也不立即入席，玩家仍在第一选择的候补队列中。第一选择自动补位成功后清除第二选择；退出报名会一并删除，删除第二选择桌只清除该选择。
+
+截止时先对每桌分配以该桌为第二选择的候补，人数超过空位时按稳定 seed 随机抽取。所有桌完成这一轮后，剩余候补（包括第二选择满员或抽签未入选者）沿用原有随机顺序、优先当前人数最少且未满桌的逻辑。已入席者不移动；预览、自然到期及提前截止均复用此算法。
+
 ## 活动视图
 
 `GET /events/:code` 和 `/results` 的 `data` 包含：
@@ -136,7 +141,7 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 
 每桌包含 `id,name,capacity,description,difficulty,hostId,hostName,isHost,attendees,waitlist`。`isHost` 相对于当前活动有效身份。
 
-报名项包含 `id,participantId,displayName,primaryGameId,finalGameId,status,isHost,allocationReason`。候补项另有 1 起始的 `rank`。状态为 `attendee`、`waitlist` 或 `unassigned`；正式结算后的分配原因为 `primary`、`balanced` 或 `null`。
+报名项包含 `id,participantId,displayName,primaryGameId,finalGameId,status,isHost,allocationReason`。候补项另有 1 起始的 `rank`。仅当前身份自己的 `registration` 另包含 `secondaryGameId`（未设置时为 `null`）；公开入席、候补和未分配名单不包含此字段。状态为 `attendee`、`waitlist` 或 `unassigned`；正式结算后的分配原因为 `primary`、`balanced` 或 `null`，`balanced` 包含第二选择和后续均衡分配的候补。
 
 正式结算汇总 `result` 包含 `gameCount,attendeeCount,assignedFromWaitlist,unassignedCount`。分配预览返回各桌的预期入席者和相同结构的汇总，但不会写入正式结果。
 
@@ -171,6 +176,7 @@ Base URL：`/api/v1`。所有写请求使用 JSON 对象和 `Content-Type: appli
 | 404 `NOT_FOUND` | 活动、桌游或目标成员不存在/已清理 |
 | 409 `NAME_TAKEN`, `ALREADY_REGISTERED` | 姓名冲突或已有主选报名 |
 | 409 `EVENT_CLOSED`, `HOST_MUST_DELETE` | 已截止，或 host 需要通过删桌退出 |
+| 409 `NOT_WAITLISTED` | 当前报名不是候补，不能设置第二选择 |
 | 409 `CONFLICT`, `BUSY` | 数据约束冲突、活动正在更新，刷新/重试 |
 | 415 `INVALID_CONTENT_TYPE` | 写请求不是 JSON |
 | 429 `RATE_LIMITED` | 请求频率过高 |

@@ -133,7 +133,13 @@ function renderMyStatus() {
     text = `你正在「${game?.name || '桌游'}」候补${wait?.rank ? `，排第 ${wait.rank} 位` : ''}。有人退出会自动晋级；截止后候补可能分配到其他桌。`;
   }
   if (registration.status === 'unassigned') text = '本次活动已完成分桌，很遗憾没有足够空位，你暂未分配到桌游。';
-  return `<section class="status-panel"><p>${esc(text)}</p>${mutable() ? (registration.isHost ? '<p class="help">Host 退出需删除自己创建的桌游，该桌所有报名会一并解除。</p>' : '<div class="button-row"><button class="button button-secondary button-small" data-action="drop">退出当前报名</button></div>') : ''}</section>`;
+  const alternatives = state.details.games.filter((item) => item.id !== registration.primaryGameId);
+  const secondChoice = mutable() && registration.status === 'waitlist' ? `<form data-form="second-choice" class="form-stack second-choice-form">
+    <label class="field">第二选择（可选，仅你可见）<select name="secondaryGameId" ${alternatives.length ? '' : 'disabled'}><option value="">不设置第二选择</option>${alternatives.map((item) => `<option value="${esc(item.id)}" ${item.id === registration.secondaryGameId ? 'selected' : ''}>${esc(item.name)}${item.attendees.length >= item.capacity ? '（已满员，仍可选择）' : ''}</option>`).join('')}</select></label>
+    <p class="help">${alternatives.length ? '第二选择不计入人数或名单，也不立即入席。截止时优先尝试分配到第二选择，名额不足时随机抽取；剩余候补按原规则分配。第一选择补位成功后会自动清除第二选择。' : '目前没有其他桌游可作为第二选择。'}</p>
+    <div class="button-row"><button class="button button-secondary button-small" type="submit" ${alternatives.length ? '' : 'disabled'}>保存第二选择</button>${registration.secondaryGameId ? '<button class="button button-secondary button-small" type="button" data-action="clear-second-choice">取消第二选择</button>' : ''}</div>
+  </form>` : '';
+  return `<section class="status-panel"><p>${esc(text)}</p>${secondChoice}${mutable() ? (registration.isHost ? '<p class="help">Host 退出需删除自己创建的桌游，该桌所有报名会一并解除。</p>' : '<div class="button-row"><button class="button button-secondary button-small" data-action="drop">退出当前报名</button></div>') : ''}</section>`;
 }
 
 function renderManager() {
@@ -194,7 +200,7 @@ function renderEvent() {
     ${key ? `<section class="secret-panel"><h2>请保存你的组织者恢复密钥</h2><p>当前浏览器已拥有管理权限。换浏览器时可用此密钥恢复管理，请单独保存，只分享给可信任的组织者。</p><code class="secret-key">${esc(key)}</code><div class="button-row"><button class="button button-yellow button-small" data-action="copy-key">复制恢复密钥</button><button class="button button-secondary button-small" data-action="hide-key">已保存，隐藏密钥</button></div></section>` : ''}
     ${renderIdentity()}${renderMyStatus()}
     ${renderRegistrationResult()}
-    <div class="section-top"><h2>${event.status === 'finalized' ? '最终桌游分配' : '这次玩什么'} <span class="badge">${games.length} 桌</span></h2></div><p class="section-note">${event.status === 'finalized' ? '名单已固定。活动结束 24 小时后，本活动及报名数据将自动删除。' : '每人只能选择一桌，人数包含 Host。候补会在有空位时自动晋级。'}</p>
+    <div class="section-top"><h2>${event.status === 'finalized' ? '最终桌游分配' : '这次玩什么'} <span class="badge">${games.length} 桌</span></h2></div><p class="section-note">${event.status === 'finalized' ? '名单已固定。活动结束 24 小时后，本活动及报名数据将自动删除。' : '每人只能报名一桌，人数包含 Host。候补会在有空位时自动晋级，也可设置一个不计入人数的第二选择。'}</p>
     ${games.length ? `<div class="game-grid">${games.map(renderGame).join('')}</div>` : '<div class="empty">还没有桌游。带上一款喜欢的游戏，来当第一位 Host 吧。</div>'}
     ${mutable() && !state.details.registration ? `<details class="panel create-game"><summary>我来开一桌</summary><form data-form="create-game" class="form-stack">${gameFields()}<p class="help">创建后你会自动成为 Host 并占一个席位。每人只能报名或主持一桌。</p><button class="button button-primary" type="submit">创建桌游，成为 Host</button></form></details>` : ''}
     ${event.status === 'finalized' && unassigned.length ? `<section class="panel unassigned"><h2>暂未分配到桌游</h2>${names(unassigned)}</section>` : ''}
@@ -318,6 +324,12 @@ root.addEventListener('submit', (event) => {
       message('组织者权限已恢复。');
       return;
     }
+    if (kind === 'second-choice') {
+      await api(`/events/${state.code}/my-registration`, 'PATCH', { secondaryGameId: values.secondaryGameId || null });
+      await refresh();
+      message(values.secondaryGameId ? '第二选择已保存，将在截止分配时优先尝试。' : '已取消第二选择。');
+      return;
+    }
     if (kind === 'create-game' || kind === 'edit-game') {
       await ensureMember();
       values.capacity = Number(values.capacity);
@@ -402,7 +414,13 @@ root.addEventListener('click', (event) => {
       await ensureMember();
       const result = await api(`/events/${state.code}/games/${id}/registrations`, 'POST', {});
       await refresh();
-      message(result.status === 'waitlist' ? '已进入候补，有空位时会自动晋级。' : '报名成功，已为你留好席位。');
+      message(result.status === 'waitlist' ? '已进入候补，有空位时会自动晋级。你也可以在报名状态中设置第二选择。' : '报名成功，已为你留好席位。');
+      return;
+    }
+    if (action === 'clear-second-choice') {
+      await api(`/events/${state.code}/my-registration`, 'PATCH', { secondaryGameId: null });
+      await refresh();
+      message('已取消第二选择。');
       return;
     }
     if (action === 'drop') {

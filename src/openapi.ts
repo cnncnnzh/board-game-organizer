@@ -41,6 +41,7 @@ const schemas: Record<string, Schema> = {
     primaryGameId: id, finalGameId: nullable(id), status: { type: 'string', enum: ['attendee', 'waitlist', 'unassigned'] },
     isHost: boolean, allocationReason: { type: ['string', 'null'], enum: ['primary', 'balanced', null] },
   }),
+  MyRegistration: { allOf: [ref('Registration'), object({ secondaryGameId: nullable(id) })] },
   WaitlistRegistration: { allOf: [ref('Registration'), object({ rank: { type: 'integer', minimum: 1 } })] },
   Game: object({
     id, name: text(50), capacity: gameFields.capacity!, description: text(500), difficulty: text(20),
@@ -49,7 +50,7 @@ const schemas: Record<string, Schema> = {
   }),
   EventView: object({
     event: ref('Event'), currentParticipantId: nullable(id), participant: nullable(ref('Participant')),
-    registration: nullable(ref('Registration')), games: list(ref('Game')), unassigned: list(ref('Registration')),
+    registration: nullable(ref('MyRegistration')), games: list(ref('Game')), unassigned: list(ref('Registration')),
     members: list(ref('Member')), testToolsEnabled: boolean, serverTime: { type: 'integer', description: 'Unix 毫秒。' },
   }),
   PreviewMember: object({ participantId: id, displayName: name, reason: { type: 'string', enum: ['host', 'primary', 'balanced'] } }),
@@ -77,6 +78,7 @@ function requestSchema(method: string, path: string): Schema | undefined {
   if (method === 'POST' && path.endsWith('/members')) return object({ displayName: name });
   if (method === 'POST' && (path.endsWith('/games') || path.endsWith('/test-games'))) return ref('CreateGameInput');
   if (method === 'PATCH' && path === '/events/:code/games/:id') return ref('EditGameInput');
+  if (method === 'PATCH' && path === '/events/:code/my-registration') return object({ secondaryGameId: nullable(id) });
   if (method === 'POST' && path.endsWith('/manage')) return object({ managementKey: { ...key, writeOnly: true }, displayName: name }, ['managementKey']);
   if (method === 'PUT' && path === '/events/:code/admins/:id') return object({ isAdmin: boolean });
   if (method === 'POST' && path.endsWith('/owner-transfer')) return object({ participantId: id });
@@ -95,6 +97,7 @@ function responseSchema(method: string, path: string): Schema {
   if (path.endsWith('/owner-transfer')) return envelope(object({ ownerId: id }));
   if (path.endsWith('/preview')) return ref('PreviewEnvelope');
   if (path.endsWith('/finalize') || path.endsWith('/test-finalize')) return envelope(object({ result: ref('Result') }));
+  if (method === 'PATCH' && path === '/events/:code/my-registration') return envelope(object({ secondaryGameId: nullable(id) }));
   if (method === 'POST' && path === '/events/:code/games/:id/test-users') return envelope(object({
     createdCount: count, participantIds: list(id), gameId: id, attendeeCount: count, waitlistCount: count,
   }));
@@ -109,6 +112,7 @@ const summaries: Record<string, string> = {
   'POST /events/:code/finalize': 'owner 立即截止并保存正式分桌结果；重复调用不重新分配',
   'POST /events/:code/games': '成员开桌，host 自动入席', 'PATCH /events/:code/games/:id': 'host 编辑桌游，扩容自动补位',
   'DELETE /events/:code/games/:id': 'host 删桌并释放全部报名', 'POST /events/:code/games/:id/registrations': '报名主选桌或进入候补',
+  'PATCH /events/:code/my-registration': '候补玩家设置或取消自己的第二选择；仅截止分配时生效',
   'DELETE /events/:code/my-registration': '退出自己的非 host 报名并晋级候补',
   'POST /events/:code/manage': '用密钥恢复当前活动 owner 权限', 'POST /events/:code/management-key': 'owner 轮换密钥并撤销其他恢复授权',
   'PUT /events/:code/admins/:id': 'owner 任免活动管理员', 'POST /events/:code/owner-transfer': 'owner 转让；旧密钥和恢复授权失效',

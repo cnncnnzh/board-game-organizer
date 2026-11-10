@@ -65,6 +65,80 @@ test('empty games or candidates produce sensible results', () => {
   assert.equal(result.openSeatCount, 3);
 });
 
+test('second choices take priority even when their table already has more attendees', () => {
+  const input = {
+    games: [game('small', 4, ['hs']), game('preferred', 4, ['hp', 'p1', 'p2'])],
+    registrations: [{ ...waiting('choice'), secondaryGameId: 'preferred' }, waiting('other')], seed: 'priority',
+  };
+  const original = structuredClone(input);
+  const result = allocateWaitlist(input);
+  assert.deepEqual(result.assignments, [
+    { participantId: 'choice', gameId: 'preferred', reason: 'balanced' },
+    { participantId: 'other', gameId: 'small', reason: 'balanced' },
+  ]);
+  assert.deepEqual(input, original);
+  assert.equal(result.openSeatCount, 4);
+});
+
+test('all tables finish second-choice allocation before any remaining players are balanced', () => {
+  const result = allocateWaitlist({
+    games: [game('a', 2, ['ha']), game('b', 2, ['hb']), game('c', 3, ['hc'])],
+    registrations: [waiting('ordinary'), { ...waiting('b-choice'), secondaryGameId: 'b' }, { ...waiting('a-choice'), secondaryGameId: 'a' }],
+    seed: 'all-choices-first',
+  });
+  assert.deepEqual(result.assignments.map((a) => [a.participantId, a.gameId]), [
+    ['a-choice', 'a'], ['b-choice', 'b'], ['ordinary', 'c'],
+  ]);
+});
+
+test('oversubscribed second choices use a reproducible lottery and losers enter the remaining allocation', () => {
+  const winners = new Set<string>();
+  for (let run = 0; run < 40; run++) {
+    const input = {
+      games: [game('preferred', 2, ['hp']), game('fallback', 3, ['hf'])],
+      registrations: ['a', 'b', 'c'].map((id) => ({ ...waiting(id), secondaryGameId: 'preferred' })), seed: String(run),
+    };
+    const result = allocateWaitlist(input);
+    assert.deepEqual(result, allocateWaitlist(input));
+    winners.add(result.assignments[0]!.participantId);
+    assert.equal(result.assignments[0]!.gameId, 'preferred');
+    assert.deepEqual(result.assignments.slice(1).map((a) => a.gameId), ['fallback', 'fallback']);
+    assert.equal(new Set(result.assignments.map((a) => a.participantId)).size, 3);
+    assert.deepEqual(result.unassigned, []);
+  }
+  assert.equal(winners.size, 3);
+});
+
+test('full or unavailable second choices fall back and seated players never participate', () => {
+  const result = allocateWaitlist({
+    games: [game('full', 1, ['seated']), game('open', 4, ['host'])],
+    registrations: [
+      { participantId: 'seated', status: 'attendee', secondaryGameId: 'open' },
+      { ...waiting('full-choice'), secondaryGameId: 'full' },
+      { ...waiting('deleted-choice'), secondaryGameId: 'missing' },
+      { ...waiting('no-choice'), secondaryGameId: null },
+    ], seed: 'fallbacks',
+  });
+  assert.equal(result.assignments.length, 3);
+  assert.ok(result.assignments.every((a) => a.gameId === 'open' && a.participantId !== 'seated'));
+  assert.deepEqual(result.gameState[0]!.attendeeParticipantIds, ['seated']);
+});
+
+test('second-choice overflow conserves every player once without exceeding capacity across seeds', () => {
+  for (let run = 0; run < 100; run++) {
+    const registrations = Array.from({ length: 12 }, (_, i) => ({
+      ...waiting(`w${i}`), secondaryGameId: [null, 'a', 'b', 'full'][i % 4],
+    }));
+    const result = allocateWaitlist({ games: [game('a', 3, ['ha']), game('b', 4, ['hb']), game('full', 1, ['hf'])], registrations, seed: String(run) });
+    const resolved = [...result.assignments.map((a) => a.participantId), ...result.unassigned];
+    assert.equal(result.assignments.length, 5);
+    assert.equal(result.unassigned.length, 7);
+    assert.deepEqual([...resolved].sort(), registrations.map((r) => r.participantId).sort());
+    assert.equal(new Set(resolved).size, registrations.length);
+    for (const table of result.gameState) assert.ok(table.attendeeParticipantIds.length <= table.capacity);
+  }
+});
+
 test('100 different inputs preserve capacity, uniqueness, conservation, and fewest-attendees ordering', () => {
   for (let run = 0; run < 100; run++) {
     const games = [game('a', 4 + run % 4, Array.from({ length: 1 + run % 3 }, (_, i) => `a${i}`)), game('b', 3 + run % 3, Array.from({ length: 1 + run % 2 }, (_, i) => `b${i}`)), game('c', 4 + run % 2, Array.from({ length: 2 + run % 2 }, (_, i) => `c${i}`))];

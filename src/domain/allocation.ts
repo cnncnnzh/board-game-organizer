@@ -9,11 +9,13 @@ export interface AllocationGame {
 export interface AllocationRegistration {
   participantId: string;
   status: string;
+  secondaryGameId?: string | null;
 }
 
 export interface Assignment {
   participantId: string;
   gameId: string;
+  // Shared by all waitlist assignments so public results do not disclose preferences.
   reason: 'balanced';
 }
 
@@ -63,9 +65,22 @@ export function allocateWaitlist({ games, registrations, seed }: {
   const openSeatCount = gameState.reduce(
     (sum, game) => sum + Math.max(0, game.capacity - game.attendeeParticipantIds.length), 0,
   );
-  const shuffledCandidates = shuffle(candidates, random);
-  const selectedCount = Math.min(shuffledCandidates.length, openSeatCount);
   const assignments: Assignment[] = [];
+  const assignedParticipants = new Set<string>();
+  // Complete every table's second-choice round before balancing any remaining players.
+  for (const game of gameState) {
+    const available = Math.max(0, game.capacity - game.attendeeParticipantIds.length);
+    if (!available) continue;
+    const interested = candidates.filter((registration) => registration.secondaryGameId === game.id);
+    const selected = interested.length > available ? shuffle(interested, random).slice(0, available) : interested;
+    for (const registration of selected) {
+      game.attendeeParticipantIds.push(registration.participantId);
+      assignedParticipants.add(registration.participantId);
+      assignments.push({ participantId: registration.participantId, gameId: game.id, reason: 'balanced' });
+    }
+  }
+  const shuffledCandidates = shuffle(candidates.filter((registration) => !assignedParticipants.has(registration.participantId)), random);
+  const selectedCount = Math.min(shuffledCandidates.length, openSeatCount - assignments.length);
   for (let index = 0; index < selectedCount; index += 1) {
     const registration = shuffledCandidates[index]!;
     const availableGames = gameState.filter((game) => game.attendeeParticipantIds.length < game.capacity);

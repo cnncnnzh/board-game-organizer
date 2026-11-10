@@ -96,6 +96,7 @@ export async function buildApp(options: {
   route('PATCH', '/events/:code/games/:id', async (req) => app.service.updateGame(params(req).code!, params(req).id!, actor(req), body(req)));
   route('DELETE', '/events/:code/games/:id', async (req) => app.service.deleteGame(params(req).code!, params(req).id!, actor(req)));
   route('POST', '/events/:code/games/:id/registrations', async (req) => app.service.joinGame(params(req).code!, params(req).id!, actor(req)));
+  route('PATCH', '/events/:code/my-registration', async (req) => app.service.updateSecondChoice(params(req).code!, actor(req), body(req).secondaryGameId));
   route('DELETE', '/events/:code/my-registration', async (req) => app.service.dropGame(params(req).code!, actor(req)));
   route('POST', '/events/:code/manage', async (req, reply) => app.service.recover(params(req).code!, await ensureIdentity(req, reply, '活动管理员'), body(req).managementKey), true);
   route('POST', '/events/:code/management-key', async (req) => app.service.rotateManagementKey(params(req).code!, actor(req)), true);
