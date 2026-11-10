@@ -130,6 +130,25 @@ export class EventService {
     Object.assign(event, { status: 'finalized', finalized_at: finalizedAt, result: summary });
     return true;
   }
+  private async closeAndFinalizeLocked(tx: Queryable, event: Row) {
+    if (event.status === 'open') {
+      const now = this.now();
+      // Keep the seed so this snapshot produces the same result as at the scheduled deadline.
+      if (now < new Date(event.registration_closes_at).getTime()) {
+        event.registration_closes_at = new Date(now).toISOString();
+        await tx.query('UPDATE events SET registration_closes_at=$1 WHERE id=$2', [event.registration_closes_at, event.id]);
+      }
+      await this.finalizeLocked(tx, event);
+    }
+    return { result: event.result };
+  }
+  async finalizeEvent(code: string, actor: Actor) {
+    return this.db.transaction(async (tx) => {
+      const event = await this.locked(tx, code);
+      await this.requireMember(tx, event, actor, ['owner']);
+      return this.closeAndFinalizeLocked(tx, event);
+    });
+  }
   async view(code: string, actor: Actor | null) {
     return this.db.transaction(async (tx) => {
       const event = await this.locked(tx, code);
@@ -355,14 +374,8 @@ export class EventService {
       if (event.status === 'open') {
         const games = (await tx.query('SELECT id FROM games WHERE event_id=$1', [event.id])).rows;
         assert(games.length, 'INVALID_INPUT', '请先创建至少一个桌游');
-        // Simulate the deadline, preserving the seed so a preview of this snapshot still matches.
-        if (this.now() < new Date(event.registration_closes_at).getTime()) {
-          event.registration_closes_at = new Date(this.now()).toISOString();
-          await tx.query('UPDATE events SET registration_closes_at=$1 WHERE id=$2', [event.registration_closes_at, event.id]);
-        }
-        await this.finalizeLocked(tx, event);
       }
-      return { result: event.result };
+      return this.closeAndFinalizeLocked(tx, event);
     });
   }
   private async testMember(tx: Queryable, eventId: string, id: string) {

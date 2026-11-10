@@ -181,7 +181,7 @@ function renderEvent() {
   document.title = `${event.title} · 桌游一起玩`;
   const key = managementKey();
   root.innerHTML = `<div class="event-head"><div class="event-title-row"><h1>${esc(event.title)}</h1><a class="header-link" href="/">创建活动</a></div><p class="event-meta"><span>地点 · ${esc(event.location)}</span><span>${esc(dateText(event.startAt, event.timeZone))} — ${esc(dateText(event.endAt, event.timeZone))}</span><span>${esc(event.timeZone || getZone())}</span></p></div>
-    <div class="event-tools"><div><span class="badge ${closed ? 'badge-closed' : ''}">${event.status === 'finalized' ? '分桌完成' : closed ? '报名已截止' : '正在报名'}</span> <span class="tiny muted">${closed ? '报名截止' : '报名截至'} ${esc(dateText(event.registrationClosesAt, event.timeZone))}</span></div><div class="button-row"><button class="button button-secondary button-small" data-action="copy-link">复制邀请链接</button><button class="button button-secondary button-small" data-action="copy-code">复制活动码</button><button class="button button-secondary button-small" data-action="refresh">刷新</button></div></div>
+    <div class="event-tools"><div class="button-row"><span class="badge ${closed ? 'badge-closed' : ''}">${event.status === 'finalized' ? '分桌完成' : closed ? '报名已截止' : '正在报名'}</span><span class="tiny muted">${closed ? '报名截止' : '报名截至'} ${esc(dateText(event.registrationClosesAt, event.timeZone))}</span>${event.role === 'owner' && !closed ? '<button class="button button-yellow button-small" data-action="finalize">提前截止并分配</button>' : ''}</div><div class="button-row"><button class="button button-secondary button-small" data-action="copy-link">复制邀请链接</button><button class="button button-secondary button-small" data-action="copy-code">复制活动码</button><button class="button button-secondary button-small" data-action="refresh">刷新</button></div></div>
     ${key ? `<section class="secret-panel"><h2>请保存你的组织者恢复密钥</h2><p>当前浏览器已拥有管理权限。换浏览器时可用此密钥恢复管理，请单独保存，只分享给可信任的组织者。</p><code class="secret-key">${esc(key)}</code><div class="button-row"><button class="button button-yellow button-small" data-action="copy-key">复制恢复密钥</button><button class="button button-secondary button-small" data-action="hide-key">已保存，隐藏密钥</button></div></section>` : ''}
     ${renderIdentity()}${renderMyStatus()}
     ${event.status === 'finalized' && event.result ? `<div class="result-summary"><span class="result-stat"><strong>${esc(event.result.attendeeCount ?? games.reduce((n, game) => n + (game.attendees?.length || 0), 0))}</strong>人入席</span><span class="result-stat"><strong>${esc(event.result.assignedFromWaitlist || 0)}</strong>人从候补分配</span><span class="result-stat"><strong>${esc(event.result.unassignedCount || 0)}</strong>人未分配</span></div>` : ''}
@@ -419,10 +419,11 @@ root.addEventListener('click', (event) => {
       await api(`/events/${state.code}/test-fill`, 'POST', {});
     } else if (action === 'test-reuse') {
       await api(`/events/${state.code}/test-reuse`, 'POST', {});
-    } else if (action === 'test-finalize') {
-      const { result } = await api(`/events/${state.code}/test-finalize`, 'POST', {});
+    } else if (action === 'finalize' || action === 'test-finalize') {
+      if (action === 'finalize' && !confirm('确定现在截止报名并分配候补吗？最终名单将立即固定，之后不能重新开放报名或修改桌游与名单。活动开始和结束时间不变。')) return;
+      const { result } = await api(`/events/${state.code}/${action}`, 'POST', {});
       await refresh({ expandGames: true });
-      message(`测试分配已完成：${result.attendeeCount} 人入席，${result.assignedFromWaitlist} 人从候补分配，${result.unassignedCount} 人未分配。`);
+      message(`${action === 'finalize' ? '已截止并完成分配' : '测试分配已完成'}：${result.attendeeCount} 人入席，${result.assignedFromWaitlist} 人从候补分配，${result.unassignedCount} 人未分配。`);
       document.querySelector('.result-summary')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
       return;
     } else if (action === 'preview') {
